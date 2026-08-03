@@ -180,19 +180,28 @@ def get_us_price(symbol: str, exchange: str = "NAS") -> dict:
         kind="market",
     )
     out = data.get("output") or {}
-    try:
-        last = float(out.get("last") or 0)
-    except (TypeError, ValueError):
-        last = 0.0
-    try:
-        rate = float(out.get("rate") or 0)
-    except (TypeError, ValueError):
-        rate = 0.0
+
+    def _f(*keys: str) -> float:
+        for k in keys:
+            v = out.get(k)
+            if v not in (None, ""):
+                try:
+                    return float(v)
+                except (TypeError, ValueError):
+                    continue
+        return 0.0
+
+    last = _f("last")
+    rate = _f("rate")
     return {
         "symbol": symbol.upper(),
         "exchange": exchange.upper(),
         "last": last,
         "rate": rate,
+        "open": _f("open"),
+        "high": _f("high"),
+        "low": _f("low"),
+        "volume": _f("tvol"),
         "raw": out,
     }
 
@@ -311,6 +320,24 @@ def _parse_rank_rows(rows: list, *, name_keys: tuple[str, ...] = ("name", "knam"
                     break
             n_rate = r.get("n_rate")
             surge = float(n_rate) if n_rate not in (None, "") else 0.0
+            tomv = 0.0
+            if r.get("tomv") not in (None, ""):
+                try:
+                    tomv = float(r.get("tomv"))
+                except (TypeError, ValueError):
+                    tomv = 0.0
+            a_tvol = 0.0
+            if r.get("a_tvol") not in (None, ""):
+                try:
+                    a_tvol = float(r.get("a_tvol"))
+                except (TypeError, ValueError):
+                    a_tvol = 0.0
+            rank = 0
+            if r.get("rank") not in (None, ""):
+                try:
+                    rank = int(float(r.get("rank")))
+                except (TypeError, ValueError):
+                    rank = 0
             parsed.append({
                 "symbol": symb,
                 "exchange": excd,
@@ -318,7 +345,10 @@ def _parse_rank_rows(rows: list, *, name_keys: tuple[str, ...] = ("name", "knam"
                 "last": last,
                 "rate": rate,
                 "volume": tvol,
+                "avg_volume": a_tvol,
                 "surge_rate": surge,
+                "mktcap": tomv,
+                "rank": rank,
                 "tradable": str(r.get("e_ordyn") or "Y").upper() in ("Y", "YES", ""),
             })
         except (TypeError, ValueError):
@@ -380,6 +410,22 @@ def get_trade_vol(exchange: str = "NAS", *, vol_rang: str = "3") -> list[dict]:
             "NDAY": "0",
             "PRC1": "",
             "PRC2": "",
+            "VOL_RANG": vol_rang,
+        },
+        kind="market",
+    )
+    return _parse_rank_rows(_rank_rows(data))
+
+
+def get_market_cap(exchange: str = "NAS", *, vol_rang: str = "0") -> list[dict]:
+    """해외주식 시가총액 순위 (대형주 필터용)."""
+    data = _get(
+        "/uapi/overseas-stock/v1/ranking/market-cap",
+        "HHDFS76350100",
+        {
+            "KEYB": "",
+            "AUTH": "",
+            "EXCD": exchange.upper(),
             "VOL_RANG": vol_rang,
         },
         kind="market",

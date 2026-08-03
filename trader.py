@@ -91,7 +91,9 @@ def _run_screen(force: bool = False, *, notify: bool = False) -> None:
             preview = us_screener.format_watchlist_preview(8)
             notifier.send(
                 f"🇺🇸 <b>US 스크리너</b> ({mode})\n"
-                f"후보 {len(wl)}종 · 등락≥{stats.get('min_rate', '?')}%\n"
+                f"순위API→필터→TOP{us_screener.MAX_WATCH} · "
+                f"등락≥{stats.get('min_rate', '?')}% · "
+                f"메가제외 {stats.get('mega_excluded', '?')}\n"
                 f"{preview}"
             )
     except Exception as e:
@@ -164,7 +166,9 @@ def main() -> None:
         f"🇺🇸 <b>미국주식 봇 시작</b> — {market_hours.now_kst().strftime('%Y-%m-%d %H:%M')} KST\n"
         f"{acct_line}\n"
         f"세션: {session} (NY {market_hours.now_ny().strftime('%H:%M')})\n"
-        f"워치({dyn}/{stats.get('mode', '?')}): {preview}\n"
+        f"워치({dyn}/{stats.get('mode', '?')} TOP{us_screener.MAX_WATCH}): {preview}\n"
+        f"규칙: S(RVOL)={'ON' if us_sim.ENABLE_S else 'OFF'} / "
+        f"ORB={'ON' if us_sim.ENABLE_ORB else 'OFF'}({us_sim.ORB_MINUTES}m)\n"
         f"시뮬: {'ON' if us_sim.is_enabled() else 'OFF'} / "
         f"실전주문: {'ON' if LIVE_ORDERS else 'OFF (기본)'}\n"
         f"점검 주기: {POLL_MIN}분 · 스크린 {us_screener.SCREEN_INTERVAL_MIN}분\n"

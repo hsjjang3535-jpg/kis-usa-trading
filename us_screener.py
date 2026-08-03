@@ -1,15 +1,16 @@
 """
 미국주식 동적 스크리너 (국내장 스크리너와 같은 역할)
 
-후보 풀:
-  1) 나스닥(+옵션 뉴욕) 거래량급증 상위
+후보 소스 (KIS 해외 순위 API — 거래소 전종목 순위표에서 상위권):
+  1) 거래량급증 상위
   2) 상승률 상위
+  ※ 티커 전수 스캔이 아니라, KIS가 주는 순위 리스트(보통 수십~100+)에서 필터 후 TOP N
+
 필터:
-  - 당일 등락률 하한
-  - 최소 가격
-  - 매매가능 종목
+  - 당일 등락률 하한 / 최소 가격 / 매매가능
+  - 시가총액 상위(메가캡) 제외 — 미국형 S·ORB에 맞게 중소형·모멘텀 위주
 최종:
-  - 점수(등락률·급증율) 순으로 TOP N → 워치리스트
+  - 점수(등락률·급증율) 순 TOP N → 워치리스트
 실패 시 US_WATCHLIST 고정 폴백
 """
 from __future__ import annotations
@@ -29,10 +30,23 @@ MIN_PRICE = float(os.getenv("US_SCREEN_MIN_PRICE", "5.0"))
 VOL_RANG = os.getenv("US_SCREEN_VOL_RANG", "3")  # 1만주 이상
 INCLUDE_NYS = os.getenv("US_SCREEN_INCLUDE_NYS", "false").lower() == "true"
 SCREEN_INTERVAL_MIN = int(os.getenv("US_SCREEN_INTERVAL_MIN", "30"))
+EXCLUDE_MEGA = os.getenv("US_EXCLUDE_MEGA_CAP", "true").lower() == "true"
+MEGA_RANK_CUTOFF = int(os.getenv("US_MEGA_CAP_RANK_CUTOFF", "50"))
+# 시총 순위 API 실패 시 하드 블록 (초대형)
+_DEFAULT_MEGA = (
+    "AAPL,MSFT,NVDA,GOOGL,GOOG,AMZN,META,TSLA,BRK.B,BRKB,"
+    "AVGO,JPM,V,UNH,XOM,MA,LLY,JNJ,WMT,PG"
+)
+MEGA_BLOCKLIST = {
+    s.strip().upper()
+    for s in os.getenv("US_MEGA_CAP_BLOCKLIST", _DEFAULT_MEGA).split(",")
+    if s.strip()
+}
 
 _watchlist: list[dict] = []
 _last_screen_at: datetime | None = None
 _last_stats: dict = {}
+_mega_symbols: set[str] = set()
 
 
 def _fallback_watchlist() -> list[dict]:
@@ -72,6 +86,13 @@ def get_last_stats() -> dict:
     return dict(_last_stats)
 
 
+def is_mega_cap(symbol: str) -> bool:
+    sym = symbol.upper()
+    if EXCLUDE_MEGA and sym in MEGA_BLOCKLIST:
+        return True
+    return EXCLUDE_MEGA and sym in _mega_symbols
+
+
 def format_watchlist_preview(limit: int = 8) -> str:
     wl = get_watchlist()
     parts = []
@@ -89,6 +110,26 @@ def _score(item: dict) -> float:
     return float(item.get("rate") or 0) + min(float(item.get("surge_rate") or 0) / 10.0, 20.0)
 
 
+def _refresh_mega_set(exchanges: list[str]) -> int:
+    """시가총액 순위 상위 → 메가캡 제외 집합."""
+    global _mega_symbols
+    mega: set[str] = set(MEGA_BLOCKLIST) if EXCLUDE_MEGA else set()
+    if not EXCLUDE_MEGA:
+        _mega_symbols = set()
+        return 0
+    for ex in exchanges:
+        try:
+            rows = kis_us_api.get_market_cap(ex, vol_rang="0")
+            for i, r in enumerate(rows):
+                rank = int(r.get("rank") or (i + 1))
+                if rank <= MEGA_RANK_CUTOFF:
+                    mega.add(r["symbol"])
+        except Exception as e:
+            print(f"[US스크리너] 시총순위 실패 {ex}: {e}")
+    _mega_symbols = mega
+    return len(mega)
+
+
 def _merge_pool(rows: list[dict], source: str) -> dict[str, dict]:
     pool: dict[str, dict] = {}
     for r in rows:
@@ -97,6 +138,8 @@ def _merge_pool(rows: list[dict], source: str) -> dict[str, dict]:
         if float(r.get("last") or 0) < MIN_PRICE:
             continue
         if float(r.get("rate") or 0) < MIN_RATE:
+            continue
+        if is_mega_cap(r["symbol"]):
             continue
         key = f"{r['exchange']}:{r['symbol']}"
         item = {
@@ -107,6 +150,8 @@ def _merge_pool(rows: list[dict], source: str) -> dict[str, dict]:
             "rate": float(r.get("rate") or 0),
             "surge_rate": float(r.get("surge_rate") or 0),
             "volume": r.get("volume"),
+            "avg_volume": r.get("avg_volume"),
+            "mktcap": r.get("mktcap"),
             "source": source,
         }
         prev = pool.get(key)
@@ -137,6 +182,7 @@ def run_screening(force: bool = False) -> list[dict]:
     if INCLUDE_NYS:
         exchanges.append("NYS")
 
+    mega_n = _refresh_mega_set(exchanges)
     pool: dict[str, dict] = {}
     surge_n = up_n = 0
     errors: list[str] = []
@@ -170,12 +216,13 @@ def run_screening(force: bool = False) -> list[dict]:
         "surge_raw": surge_n,
         "updown_raw": up_n,
         "pool": len(pool),
+        "mega_excluded": mega_n,
         "min_rate": MIN_RATE,
         "errors": errors[:3],
         "at": now.strftime("%H:%M"),
     }
     print(
-        f"[US스크리너] {mode} {len(_watchlist)}종 "
-        f"(급증원본 {surge_n} / 상승원본 {up_n} / 풀 {len(pool)})"
+        f"[US스크리너] {mode} TOP{MAX_WATCH}→{len(_watchlist)}종 "
+        f"(급증 {surge_n} / 상승 {up_n} / 풀 {len(pool)} / 메가제외집합 {mega_n})"
     )
     return list(_watchlist)
