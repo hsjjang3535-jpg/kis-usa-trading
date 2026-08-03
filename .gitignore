@@ -1,0 +1,12 @@
+.env
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.idea/
+.vscode/
+trading_state.json
+pnl_ledger.json
+*.log
+.DS_Store
