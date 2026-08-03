@@ -291,3 +291,97 @@ def sell_us_stock(
         "ORD_DVSN": order_type,
     }
     return _post("/uapi/overseas-stock/v1/trading/order", tr_id, body)
+
+
+def _parse_rank_rows(rows: list, *, name_keys: tuple[str, ...] = ("name", "knam", "ename", "enam")) -> list[dict]:
+    parsed: list[dict] = []
+    for r in rows or []:
+        try:
+            symb = str(r.get("symb") or "").strip().upper()
+            if not symb:
+                continue
+            excd = str(r.get("excd") or "NAS").strip().upper() or "NAS"
+            last = float(r.get("last") or 0)
+            rate = float(r.get("rate") or 0)
+            tvol = float(r.get("tvol") or 0)
+            name = ""
+            for k in name_keys:
+                if r.get(k):
+                    name = str(r.get(k))
+                    break
+            n_rate = r.get("n_rate")
+            surge = float(n_rate) if n_rate not in (None, "") else 0.0
+            parsed.append({
+                "symbol": symb,
+                "exchange": excd,
+                "name": name,
+                "last": last,
+                "rate": rate,
+                "volume": tvol,
+                "surge_rate": surge,
+                "tradable": str(r.get("e_ordyn") or "Y").upper() in ("Y", "YES", ""),
+            })
+        except (TypeError, ValueError):
+            continue
+    return parsed
+
+
+def _rank_rows(data: dict) -> list:
+    rows = data.get("output2") or data.get("output1") or []
+    if isinstance(rows, dict):
+        return [rows]
+    return list(rows or [])
+
+
+def get_updown_rate(exchange: str = "NAS", *, gubn: str = "1", vol_rang: str = "3") -> list[dict]:
+    """해외주식 상승율(gubn=1) / 하락율(gubn=0) 순위."""
+    data = _get(
+        "/uapi/overseas-stock/v1/ranking/updown-rate",
+        "HHDFS76290000",
+        {
+            "KEYB": "",
+            "AUTH": "",
+            "EXCD": exchange.upper(),
+            "GUBN": gubn,
+            "NDAY": "0",
+            "VOL_RANG": vol_rang,
+        },
+        kind="market",
+    )
+    return _parse_rank_rows(_rank_rows(data))
+
+
+def get_volume_surge(exchange: str = "NAS", *, mixn: str = "3", vol_rang: str = "3") -> list[dict]:
+    """해외주식 거래량급증 순위. mixn=3 → 약 5분전 기준."""
+    data = _get(
+        "/uapi/overseas-stock/v1/ranking/volume-surge",
+        "HHDFS76270000",
+        {
+            "KEYB": "",
+            "AUTH": "",
+            "EXCD": exchange.upper(),
+            "MIXN": mixn,
+            "VOL_RANG": vol_rang,
+        },
+        kind="market",
+    )
+    return _parse_rank_rows(_rank_rows(data))
+
+
+def get_trade_vol(exchange: str = "NAS", *, vol_rang: str = "3") -> list[dict]:
+    """해외주식 거래량 순위."""
+    data = _get(
+        "/uapi/overseas-stock/v1/ranking/trade-vol",
+        "HHDFS76310010",
+        {
+            "KEYB": "",
+            "AUTH": "",
+            "EXCD": exchange.upper(),
+            "NDAY": "0",
+            "PRC1": "",
+            "PRC2": "",
+            "VOL_RANG": vol_rang,
+        },
+        kind="market",
+    )
+    return _parse_rank_rows(_rank_rows(data))

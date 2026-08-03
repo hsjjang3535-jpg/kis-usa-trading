@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 
 import kis_us_api
 import market_hours
+import us_screener
 
 KST = ZoneInfo("Asia/Seoul")
 
@@ -31,19 +32,13 @@ _trades_today: list[dict] = []
 _bought_symbols_today: set[str] = set()
 
 
-def _env_watchlist() -> list[tuple[str, str]]:
-    raw = os.getenv("US_WATCHLIST", "AAPL:NAS,MSFT:NAS,NVDA:NAS")
-    items: list[tuple[str, str]] = []
-    for part in raw.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        if ":" in part:
-            sym, ex = part.split(":", 1)
-            items.append((sym.strip().upper(), ex.strip().upper() or "NAS"))
-        else:
-            items.append((part.upper(), "NAS"))
-    return items
+def _active_watchlist() -> list[tuple[str, str]]:
+    """스크리너 동적 후보 (실패 시 US_WATCHLIST 폴백)."""
+    return [
+        (w["symbol"], w.get("exchange") or "NAS")
+        for w in us_screener.get_watchlist()
+        if w.get("symbol")
+    ]
 
 
 def is_enabled() -> bool:
@@ -207,7 +202,7 @@ def run_check() -> list[dict]:
                 events.append(t)
         return events
 
-    for symbol, exchange in _env_watchlist():
+    for symbol, exchange in _active_watchlist():
         if symbol in _bought_symbols_today:
             continue
         try:

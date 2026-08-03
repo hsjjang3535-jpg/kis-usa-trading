@@ -20,7 +20,11 @@
 |----------|--------|------|
 | `ENABLE_US_SIM` | `true` | 미국 시뮬 ON |
 | `ENABLE_US_LIVE_ORDERS` | `false` | 실주문 (당분간 false 유지) |
-| `US_WATCHLIST` | `AAPL:NAS,MSFT:NAS,NVDA:NAS,TSLA:NAS` | `티커:거래소` |
+| `US_DYNAMIC_WATCHLIST` | `true` | 동적 스크리너 (거래량급증+상승률) |
+| `US_MAX_WATCHLIST` | `10` | 동적 후보 상위 N |
+| `US_SCREEN_MIN_RATE` | `2.0` | 스크린 등락률 하한(%) |
+| `US_SCREEN_INTERVAL_MIN` | `30` | 후보 재갱신 주기(분) |
+| `US_WATCHLIST` | `AAPL:NAS,...` | 동적 실패 시 폴백 / `US_DYNAMIC_WATCHLIST=false`면 고정 |
 | `US_POLL_INTERVAL_MIN` | `5` | 정규장 점검 주기(분) |
 | `US_SIM_AMOUNT_USD` | `500` | 시뮬 1회 가상 매수(USD) |
 | `US_SIM_STOP_LOSS_PCT` | `2.0` | 손절 % |
