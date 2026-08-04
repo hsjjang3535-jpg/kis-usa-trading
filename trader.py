@@ -89,12 +89,20 @@ def _run_screen(force: bool = False, *, notify: bool = False) -> None:
         if notify and (changed or force):
             mode = stats.get("mode", "?")
             preview = us_screener.format_watchlist_preview(8)
+            tcount = stats.get("tradeable", us_screener.tradeable_count(wl))
+            warn = ""
+            if int(tcount or 0) < 1:
+                warn = "\n⚠️ 매매가능 후보 0 — 메가캡만이라 시뮬 스킵됨"
+            elif mode == "fallback":
+                warn = "\n⚠️ 순위 풀 비어 중형 폴백 사용"
             notifier.send(
                 f"🇺🇸 <b>US 스크리너</b> ({mode})\n"
                 f"순위API→필터→TOP{us_screener.MAX_WATCH} · "
                 f"등락≥{stats.get('min_rate', '?')}% · "
-                f"메가제외 {stats.get('mega_excluded', '?')}\n"
+                f"메가제외 {stats.get('mega_excluded', '?')} · "
+                f"매매가능 {tcount}\n"
                 f"{preview}"
+                f"{warn}"
             )
     except Exception as e:
         print(f"[US스크리너] 오류: {e}")
@@ -193,8 +201,15 @@ def main() -> None:
             session_open_notified = False
         # 정규장 개시 → 강제 스크린 + 알림
         if in_session and not _was_in_session:
+            notifier.send(
+                f"🇺🇸 <b>정규장 시작</b> — 시뮬 점검 가동\n"
+                f"NY {market_hours.now_ny().strftime('%H:%M')} / "
+                f"KST {now.strftime('%H:%M')}"
+            )
             _run_screen(force=True, notify=True)
             session_open_notified = True
+            last_poll_min = tmin
+            _check_sim()
         _was_in_session = in_session
 
         if in_session:

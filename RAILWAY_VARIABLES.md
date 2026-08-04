@@ -26,6 +26,8 @@
 | `US_SCREEN_INTERVAL_MIN` | `30` | 후보 재갱신 주기(분) |
 | `US_EXCLUDE_MEGA_CAP` | `true` | 시총 상위·초대형 블록 제외 |
 | `US_MEGA_CAP_RANK_CUTOFF` | `50` | 시총순위 이내 제외 |
+| `US_FALLBACK_WATCHLIST` | `SOFI:NAS,...` | 순위 실패 시 중형 폴백 (메가캡 금지) |
+| `US_SCREEN_MIN_RATE_RELAXED` | `0.5` | 풀 비면 등락 하한 완화 |
 | `ENABLE_US_S_RULE` | `true` | S·RVOL 규칙 |
 | `ENABLE_US_ORB` | `true` | ORB(오프닝 레인지 돌파) |
 | `US_ORB_MINUTES` | `15` | ORB 레인지 분 |
