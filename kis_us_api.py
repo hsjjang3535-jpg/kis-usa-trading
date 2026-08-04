@@ -238,6 +238,76 @@ def get_us_daily_prices(symbol: str, exchange: str = "NAS", days: int = 100) -> 
     return parsed
 
 
+def get_us_minute_bars(
+    symbol: str,
+    exchange: str = "NAS",
+    *,
+    nmin: int = 5,
+    nrec: int = 120,
+    include_prev: bool = False,
+) -> list[dict]:
+    """해외주식 분봉 (최신 순). VWAP 근사 계산용."""
+    data = _get(
+        "/uapi/overseas-price/v1/quotations/inquire-time-itemchartprice",
+        "HHDFS76950200",
+        {
+            "AUTH": "",
+            "EXCD": exchange.upper(),
+            "SYMB": symbol.upper(),
+            "NMIN": str(int(nmin)),
+            "PINC": "1" if include_prev else "0",
+            "NEXT": "",
+            "NREC": str(min(int(nrec), 120)),
+            "FILL": "",
+            "KEYB": "",
+        },
+        kind="market",
+    )
+    rows = data.get("output2") or []
+    parsed: list[dict] = []
+    for r in rows:
+        try:
+            o = float(r.get("open") or 0)
+            h = float(r.get("high") or 0)
+            low = float(r.get("low") or 0)
+            c = float(r.get("last") or r.get("clos") or 0)
+            v = float(r.get("evol") or r.get("tvol") or 0)
+            parsed.append({
+                "date": str(r.get("xymd") or r.get("tymd") or ""),
+                "time": str(r.get("xhms") or r.get("khms") or ""),
+                "open": o,
+                "high": h,
+                "low": low,
+                "close": c,
+                "volume": v,
+            })
+        except (TypeError, ValueError):
+            continue
+    return parsed
+
+
+def approx_vwap_from_bars(bars: list[dict]) -> float:
+    """분봉으로 VWAP 근사: Σ(typical×vol) / Σ(vol)."""
+    num = den = 0.0
+    for b in bars or []:
+        h = float(b.get("high") or 0)
+        low = float(b.get("low") or 0)
+        c = float(b.get("close") or 0)
+        v = float(b.get("volume") or 0)
+        if v <= 0 or c <= 0:
+            continue
+        typical = (h + low + c) / 3.0 if h > 0 and low > 0 else c
+        num += typical * v
+        den += v
+    return (num / den) if den > 0 else 0.0
+
+
+def get_approx_vwap(symbol: str, exchange: str = "NAS", *, nmin: int = 5) -> float:
+    """당일 분봉 기반 근사 VWAP."""
+    bars = get_us_minute_bars(symbol, exchange, nmin=nmin, nrec=120, include_prev=False)
+    return approx_vwap_from_bars(bars)
+
+
 def _ovrs_excg_cd(exchange: str) -> str:
     """주문용 거래소 코드."""
     ex = exchange.upper()

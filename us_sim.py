@@ -1,13 +1,10 @@
 """
 미국주식 시뮬 (실제 주문 없음)
 
-S규칙 (미국형 RVOL + 시총 필터):
-  전일대비 +MIN_DAY% · 시간보정 RVOL ≥ MIN · 종가 ≥ MA20 · RSI ≤ MAX
-  메가캡(시총순위 상위·블록리스트) 제외
-
-ORB (Opening Range Breakout) 병행:
-  개장 후 N분 고저 레인지 형성 → 고가 돌파 시 진입 (진입 윈도우 내)
-  동일 시총/RVOL 필터 적용
+진입 우선순위:
+  1) Gap & Go — 시가갭 + RVOL + (ORB고 돌파 또는 갭 유지) + VWAP 위
+  2) ORB — 개장 N분 레인지 고가 돌파 + RVOL + VWAP 위
+  3) S·RVOL — 일봉 모멘텀 + 시간보정 RVOL + VWAP 위
 
 청산: -2% 손절 / +5% 후 트레일 -0.6% / 정규장 종료 강제청산
 """
@@ -32,18 +29,30 @@ MIN_DAY_PCT = float(os.getenv("US_SIM_MIN_DAY_PCT", "3.0"))
 MIN_RVOL = float(os.getenv("US_SIM_MIN_RVOL", os.getenv("US_SIM_MIN_VOL_RATIO", "2.5")))
 VOL_AVG_DAYS = int(os.getenv("US_SIM_VOL_AVG_DAYS", "20"))
 MAX_RSI = float(os.getenv("US_SIM_MAX_RSI", "75"))
+
 ENABLE_S = os.getenv("ENABLE_US_S_RULE", "true").lower() == "true"
 ENABLE_ORB = os.getenv("ENABLE_US_ORB", "true").lower() == "true"
+ENABLE_GAP_GO = os.getenv("ENABLE_US_GAP_GO", "true").lower() == "true"
+REQUIRE_ABOVE_VWAP = os.getenv("US_REQUIRE_ABOVE_VWAP", "true").lower() == "true"
+VWAP_NMIN = int(os.getenv("US_VWAP_NMIN", "5"))
+
 ORB_MINUTES = int(os.getenv("US_ORB_MINUTES", "15"))
 ORB_ENTRY_UNTIL = int(os.getenv("US_ORB_ENTRY_UNTIL_MIN", "120"))
 ORB_MIN_RVOL = float(os.getenv("US_ORB_MIN_RVOL", "1.5"))
 ORB_MIN_DAY_PCT = float(os.getenv("US_ORB_MIN_DAY_PCT", "1.0"))
+
+GAP_MIN_PCT = float(os.getenv("US_GAP_MIN_PCT", "2.5"))
+GAP_MAX_PCT = float(os.getenv("US_GAP_MAX_PCT", "15.0"))
+GAP_MIN_RVOL = float(os.getenv("US_GAP_MIN_RVOL", "2.0"))
+GAP_ENTRY_UNTIL = int(os.getenv("US_GAP_ENTRY_UNTIL_MIN", "90"))
 
 _open: dict | None = None
 _trades_today: list[dict] = []
 _bought_symbols_today: set[str] = set()
 # symbol -> {high, low, ready, date}
 _orb_ranges: dict[str, dict] = {}
+# 폴링당 VWAP 캐시
+_vwap_cache: dict[str, float] = {}
 
 
 def _active_watchlist() -> list[tuple[str, str]]:
@@ -94,11 +103,12 @@ def load_state(data: dict | None) -> None:
 
 
 def reset_daily() -> None:
-    global _open, _trades_today, _bought_symbols_today, _orb_ranges
+    global _open, _trades_today, _bought_symbols_today, _orb_ranges, _vwap_cache
     _open = None
     _trades_today = []
     _bought_symbols_today = set()
     _orb_ranges = {}
+    _vwap_cache = {}
 
 
 def _rsi(closes_latest_first: list[float], period: int = 14) -> float:
@@ -140,7 +150,45 @@ def _day_pct(daily: list[dict], current: float) -> float:
     return (current - prev) / prev * 100
 
 
-def _match_s_rule(daily: list[dict], current: float, today_vol: float) -> tuple[bool, str]:
+def _gap_pct(daily: list[dict], open_px: float) -> float:
+    """시가 갭% = (시가 - 전일종가) / 전일종가."""
+    prev = daily[1]["close"] if len(daily) > 1 else 0
+    if prev <= 0 or open_px <= 0:
+        return 0.0
+    return (open_px - prev) / prev * 100
+
+
+def _get_vwap(symbol: str, exchange: str) -> float:
+    key = f"{exchange}:{symbol}"
+    if key in _vwap_cache:
+        return _vwap_cache[key]
+    try:
+        vwap = kis_us_api.get_approx_vwap(symbol, exchange, nmin=VWAP_NMIN)
+    except Exception as e:
+        print(f"[US시뮬] VWAP 실패 {symbol}: {e}")
+        vwap = 0.0
+    _vwap_cache[key] = vwap
+    return vwap
+
+
+def _above_vwap(symbol: str, exchange: str, price: float) -> tuple[bool, float]:
+    """VWAP 필터. 조회 실패(0)면 통과(차단하지 않음)."""
+    if not REQUIRE_ABOVE_VWAP:
+        return True, 0.0
+    vwap = _get_vwap(symbol, exchange)
+    if vwap <= 0:
+        return True, 0.0
+    return price >= vwap, vwap
+
+
+def _match_s_rule(
+    daily: list[dict],
+    current: float,
+    today_vol: float,
+    *,
+    symbol: str,
+    exchange: str,
+) -> tuple[bool, str]:
     if not ENABLE_S:
         return False, ""
     if len(daily) < max(60, VOL_AVG_DAYS + 2):
@@ -159,9 +207,13 @@ def _match_s_rule(daily: list[dict], current: float, today_vol: float) -> tuple[
     rvol = _rvol(daily, check_vol)
     if rvol < MIN_RVOL:
         return False, ""
+    ok_vwap, vwap = _above_vwap(symbol, exchange, current)
+    if not ok_vwap:
+        return False, ""
+    vwap_txt = f" · VWAP ${vwap:.2f}" if vwap > 0 else ""
     return True, (
         f"S·RVOL · {day_pct:+.1f}% · RVOL {rvol:.1f}x · "
-        f"MA20 ${ma20:.2f} · RSI {rsi:.0f}"
+        f"MA20 ${ma20:.2f} · RSI {rsi:.0f}{vwap_txt}"
     )
 
 
@@ -176,18 +228,13 @@ def _update_orb(symbol: str, price: float, day_high: float, day_low: float) -> d
     if market_hours.is_orb_building(ORB_MINUTES):
         hi = max(float(st["high"]), price)
         lo = min(float(st["low"]), price)
-        if day_high > 0:
-            hi = max(hi, day_high)
-        if day_low > 0:
-            lo = min(lo, day_low)
+        # 형성 구간에는 폴링 시세만 반영 (당일 high는 프리장 포함 가능)
         st["high"] = hi
         st["low"] = lo
         st["ready"] = False
     else:
-        # 레인지 확정
         if not st.get("ready") and float(st.get("high") or 0) > 0:
             st["ready"] = True
-        # 형성 구간을 놓친 경우: 당일 high/low로 대략 보정하지 않음(과대 OR)
         if not st.get("ready") and float(st.get("high") or 0) <= 0 and price > 0:
             st["high"] = price
             st["low"] = price
@@ -197,6 +244,7 @@ def _update_orb(symbol: str, price: float, day_high: float, day_low: float) -> d
 
 def _match_orb(
     symbol: str,
+    exchange: str,
     daily: list[dict],
     price: float,
     today_vol: float,
@@ -219,9 +267,54 @@ def _match_orb(
     rvol = _rvol(daily, today_vol if today_vol > 0 else float(daily[0].get("volume") or 0))
     if rvol < ORB_MIN_RVOL:
         return False, ""
+    ok_vwap, vwap = _above_vwap(symbol, exchange, price)
+    if not ok_vwap:
+        return False, ""
+    vwap_txt = f" · VWAP ${vwap:.2f}" if vwap > 0 else ""
     return True, (
         f"ORB {ORB_MINUTES}m돌파 · OR고 ${or_high:.2f} · "
-        f"{day_pct:+.1f}% · RVOL {rvol:.1f}x"
+        f"{day_pct:+.1f}% · RVOL {rvol:.1f}x{vwap_txt}"
+    )
+
+
+def _match_gap_and_go(
+    symbol: str,
+    exchange: str,
+    daily: list[dict],
+    price: float,
+    open_px: float,
+    today_vol: float,
+    day_high: float,
+    day_low: float,
+) -> tuple[bool, str]:
+    """
+    Gap & Go: 시가갭 구간 + RVOL + 갭 유지(price≥open) + ORB고 돌파 + VWAP 위.
+    """
+    if not ENABLE_GAP_GO:
+        return False, ""
+    if not market_hours.is_orb_entry_window(ORB_MINUTES, GAP_ENTRY_UNTIL):
+        return False, ""
+    gap = _gap_pct(daily, open_px if open_px > 0 else price)
+    if gap < GAP_MIN_PCT or gap > GAP_MAX_PCT:
+        return False, ""
+    if open_px > 0 and price < open_px:
+        return False, ""  # 갭 페이드
+    rvol = _rvol(daily, today_vol if today_vol > 0 else float(daily[0].get("volume") or 0))
+    if rvol < GAP_MIN_RVOL:
+        return False, ""
+    st = _update_orb(symbol, price, day_high, day_low)
+    if not st or not st.get("ready"):
+        return False, ""
+    or_high = float(st["high"])
+    if or_high <= 0 or price < or_high:
+        return False, ""
+    ok_vwap, vwap = _above_vwap(symbol, exchange, price)
+    if not ok_vwap:
+        return False, ""
+    vwap_txt = f" · VWAP ${vwap:.2f}" if vwap > 0 else ""
+    return True, (
+        f"Gap&Go · 갭 {gap:+.1f}% · OR고 ${or_high:.2f} · "
+        f"RVOL {rvol:.1f}x{vwap_txt}"
     )
 
 
@@ -270,10 +363,11 @@ def force_close(price: float, reason: str) -> dict | None:
 
 def run_check() -> list[dict]:
     """정규장 중 호출. 이벤트 리스트 반환."""
-    global _open
+    global _open, _vwap_cache
     if not ENABLED or not market_hours.is_us_regular_session():
         return []
     events: list[dict] = []
+    _vwap_cache = {}  # 폴링마다 갱신
 
     if _open:
         try:
@@ -304,23 +398,36 @@ def run_check() -> list[dict]:
             today_vol = float(px.get("volume") or 0)
             day_high = float(px.get("high") or 0)
             day_low = float(px.get("low") or 0)
+            open_px = float(px.get("open") or 0)
             daily = kis_us_api.get_us_daily_prices(symbol, exchange, days=80)
         except Exception as e:
             print(f"[US시뮬] {symbol} 조회 실패: {e}")
             continue
         if price <= 0 or not daily:
             continue
+        if open_px <= 0:
+            open_px = float(daily[0].get("open") or 0) or price
 
-        # 형성 구간: ORB 레인지 축적 + S는 병행 허용
-        if ENABLE_ORB:
+        if ENABLE_ORB or ENABLE_GAP_GO:
             _update_orb(symbol, price, day_high, day_low)
 
         ok, reason, strategy = False, "", ""
-        if not market_hours.is_orb_building(ORB_MINUTES):
-            ok, reason = _match_orb(symbol, daily, price, today_vol, day_high, day_low)
+        building = market_hours.is_orb_building(ORB_MINUTES)
+
+        if not building:
+            ok, reason = _match_gap_and_go(
+                symbol, exchange, daily, price, open_px, today_vol, day_high, day_low,
+            )
+            strategy = "GapGo"
+        if not ok and not building:
+            ok, reason = _match_orb(
+                symbol, exchange, daily, price, today_vol, day_high, day_low,
+            )
             strategy = "ORB"
         if not ok:
-            ok, reason = _match_s_rule(daily, price, today_vol)
+            ok, reason = _match_s_rule(
+                daily, price, today_vol, symbol=symbol, exchange=exchange,
+            )
             strategy = "S"
         if not ok:
             continue
@@ -354,10 +461,14 @@ def run_check() -> list[dict]:
 def format_summary() -> list[str]:
     lines: list[str] = []
     rules = []
-    if ENABLE_S:
-        rules.append(f"S(RVOL≥{MIN_RVOL:g})")
+    if ENABLE_GAP_GO:
+        rules.append(f"Gap&Go(≥{GAP_MIN_PCT:g}%)")
     if ENABLE_ORB:
         rules.append(f"ORB({ORB_MINUTES}m)")
+    if ENABLE_S:
+        rules.append(f"S(RVOL≥{MIN_RVOL:g})")
+    if REQUIRE_ABOVE_VWAP:
+        rules.append("VWAP↑")
     if rules:
         lines.append("🇺🇸 규칙: " + " + ".join(rules))
     if _trades_today:
