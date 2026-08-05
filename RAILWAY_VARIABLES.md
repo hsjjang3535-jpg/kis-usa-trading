@@ -19,7 +19,8 @@
 | Variable | 기본값 | 설명 |
 |----------|--------|------|
 | `ENABLE_US_SIM` | `true` | 미국 시뮬 ON |
-| `ENABLE_US_LIVE_ORDERS` | `false` | 실주문 (당분간 false 유지) |
+| `ENABLE_US_LIVE_ORDERS` | `false` | 방식A: 세션당 첫 1종목만 실주문 |
+| `US_LIVE_AMOUNT_USD` | `200` | 실전 1회 매수 예산(USD) |
 | `US_DYNAMIC_WATCHLIST` | `true` | 동적 스크리너 (거래량급증+상승률 순위→TOP N) |
 | `US_MAX_WATCHLIST` | `10` | 동적 후보 상위 N |
 | `US_SCREEN_MIN_RATE` | `2.0` | 스크린 등락률 하한(%) |
@@ -39,7 +40,7 @@
 | `US_POLL_INTERVAL_MIN` | `5` | 정규장 점검 주기(분) |
 | `US_SIM_AMOUNT_USD` | `500` | 시뮬 1회 가상 매수(USD) |
 | `US_SIM_STOP_LOSS_PCT` | `2.0` | 손절 % |
-| `US_SIM_TAKE_PROFIT_PCT` | `5.0` | 트레일 시작 % |
+| `US_SIM_TAKE_PROFIT_PCT` | `5.0` | 익절 % (하드) |
 | `US_HEARTBEAT_HOUR_KST` | `22` | 일일 하트비트(KST) |
 | `API_SECRET` | (임의) | `/health` 보호용 |
 

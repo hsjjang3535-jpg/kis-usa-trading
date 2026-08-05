@@ -114,6 +114,21 @@ def _run_screen(force: bool = False, *, notify: bool = False) -> None:
         notifier.notify_error(f"US 스크리너 오류: {e}")
 
 
+def _limit_buy_price(last: float) -> float:
+    """체결 유도용 지정가 (약간 위)."""
+    return round(max(last * 1.003, last + 0.01), 2)
+
+
+def _limit_sell_price(last: float) -> float:
+    return round(max(last * 0.997, 0.01), 2)
+
+
+def _downgrade_to_sim(pos_hint: bool = True) -> None:
+    pos = us_sim.get_open()
+    if pos:
+        pos["is_live"] = False
+
+
 def _check_sim() -> None:
     if not us_sim.is_enabled():
         return
@@ -121,16 +136,58 @@ def _check_sim() -> None:
         events = us_sim.run_check()
         for ev in events:
             if ev.get("action") == "buy":
-                notifier.notify_sim_buy(
-                    ev["symbol"], ev["exchange"], ev["quantity"],
-                    ev["price"], ev["reason"],
-                )
+                is_live = bool(ev.get("is_live"))
+                if is_live:
+                    try:
+                        order_px = _limit_buy_price(float(ev["price"]))
+                        kis_us_api.buy_us_stock(
+                            ev["symbol"], ev["quantity"], order_px, ev["exchange"],
+                        )
+                        us_sim.mark_live_used()
+                        notifier.notify_live_buy(
+                            ev["symbol"], ev["exchange"], ev["quantity"],
+                            ev["price"], ev["reason"],
+                        )
+                    except Exception as e:
+                        print(f"[실전매수 실패→시뮬] {e}")
+                        _downgrade_to_sim()
+                        notifier.notify_error(f"실전 매수 실패 → 시뮬로 전환: {e}")
+                        notifier.notify_sim_buy(
+                            ev["symbol"], ev["exchange"], ev["quantity"],
+                            ev["price"], ev["reason"] + " (실주문실패→시뮬)",
+                        )
+                else:
+                    notifier.notify_sim_buy(
+                        ev["symbol"], ev["exchange"], ev["quantity"],
+                        ev["price"], ev["reason"],
+                    )
             elif ev.get("action") == "sell":
-                notifier.notify_sim_sell(
-                    ev["symbol"], ev["exchange"], ev["quantity"],
-                    ev["buy_price"], ev["sell_price"],
-                    ev["profit_pct"], ev["sell_reason"],
-                )
+                is_live = bool(ev.get("is_live"))
+                if is_live:
+                    try:
+                        order_px = _limit_sell_price(float(ev["sell_price"]))
+                        kis_us_api.sell_us_stock(
+                            ev["symbol"], ev["quantity"], order_px, ev["exchange"],
+                        )
+                        notifier.notify_live_sell(
+                            ev["symbol"], ev["exchange"], ev["quantity"],
+                            ev["buy_price"], ev["sell_price"],
+                            ev["profit_pct"], ev["sell_reason"],
+                        )
+                    except Exception as e:
+                        print(f"[실전매도 실패] {e}")
+                        notifier.notify_error(f"실전 매도 실패(재시도 필요): {e}")
+                        notifier.notify_sim_sell(
+                            ev["symbol"], ev["exchange"], ev["quantity"],
+                            ev["buy_price"], ev["sell_price"],
+                            ev["profit_pct"], ev["sell_reason"] + f" (실주문실패:{e})",
+                        )
+                else:
+                    notifier.notify_sim_sell(
+                        ev["symbol"], ev["exchange"], ev["quantity"],
+                        ev["buy_price"], ev["sell_price"],
+                        ev["profit_pct"], ev["sell_reason"],
+                    )
         if events:
             _save_state()
     except Exception as e:
@@ -147,14 +204,35 @@ def _session_end_close() -> None:
         price = float(px["last"]) or float(pos["buy_price"])
     except Exception:
         price = float(pos["buy_price"])
+    was_live = bool(pos.get("is_live"))
     trade = us_sim.force_close(price, "정규장 종료 청산")
-    if trade:
+    if not trade:
+        return
+    if was_live:
+        try:
+            order_px = _limit_sell_price(float(trade["sell_price"]))
+            kis_us_api.sell_us_stock(
+                trade["symbol"], trade["quantity"], order_px, trade["exchange"],
+            )
+            notifier.notify_live_sell(
+                trade["symbol"], trade["exchange"], trade["quantity"],
+                trade["buy_price"], trade["sell_price"],
+                trade["profit_pct"], trade["sell_reason"],
+            )
+        except Exception as e:
+            notifier.notify_error(f"정규장종료 실전매도 실패: {e}")
+            notifier.notify_sim_sell(
+                trade["symbol"], trade["exchange"], trade["quantity"],
+                trade["buy_price"], trade["sell_price"],
+                trade["profit_pct"], trade["sell_reason"] + f" (실주문실패:{e})",
+            )
+    else:
         notifier.notify_sim_sell(
             trade["symbol"], trade["exchange"], trade["quantity"],
             trade["buy_price"], trade["sell_price"],
             trade["profit_pct"], trade["sell_reason"],
         )
-        _save_state()
+    _save_state()
 
 
 def main() -> None:
@@ -184,8 +262,11 @@ def main() -> None:
         f"ORB={'ON' if us_sim.ENABLE_ORB else 'OFF'}({us_sim.ORB_MINUTES}m) / "
         f"S={'ON' if us_sim.ENABLE_S else 'OFF'} / "
         f"VWAP↑={'ON' if us_sim.REQUIRE_ABOVE_VWAP else 'OFF'}\n"
-        f"시뮬: {'ON' if us_sim.is_enabled() else 'OFF'} / "
-        f"실전주문: {'ON' if LIVE_ORDERS else 'OFF (기본)'}\n"
+        f"청산: 익절 +{us_sim.TAKE_PROFIT_PCT:g}% / 손절 -{us_sim.STOP_LOSS_PCT:g}%\n"
+        f"시뮬: {'ON' if us_sim.is_enabled() else 'OFF'} "
+        f"(${us_sim.SIM_AMOUNT_USD:g}) / "
+        f"실전: {'ON 방식A 1종목' if LIVE_ORDERS else 'OFF'} "
+        f"(${us_sim.LIVE_AMOUNT_USD:g})\n"
         f"점검 주기: {POLL_MIN}분 · 스크린 {us_screener.SCREEN_INTERVAL_MIN}분\n"
         f"⚠️ 국내 kis-trading-bot과 별도 Railway 서비스"
     )
@@ -226,8 +307,6 @@ def main() -> None:
                 _run_screen(force=False, notify=True)
                 session_open_notified = True
                 _check_sim()
-                if LIVE_ORDERS:
-                    print("[실전주문] ENABLE_US_LIVE_ORDERS=true — 실주문 로직은 추후 연결")
 
         # 하트비트 (KST 지정 시각, 1회/일)
         hb = int(os.getenv("US_HEARTBEAT_HOUR_KST", "22"))

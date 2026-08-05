@@ -346,7 +346,12 @@ def buy_us_stock(
         "ORD_SVR_DVSN_CD": "0",
         "ORD_DVSN": order_type,
     }
-    return _post("/uapi/overseas-stock/v1/trading/order", tr_id, body)
+    data = _post("/uapi/overseas-stock/v1/trading/order", tr_id, body)
+    if str(data.get("rt_cd", "0")) not in ("0", ""):
+        raise RuntimeError(
+            f"매수실패 [{data.get('msg_cd')}] {data.get('msg1')} ({symbol})"
+        )
+    return data
 
 
 def sell_us_stock(
@@ -369,7 +374,12 @@ def sell_us_stock(
         "ORD_SVR_DVSN_CD": "0",
         "ORD_DVSN": order_type,
     }
-    return _post("/uapi/overseas-stock/v1/trading/order", tr_id, body)
+    data = _post("/uapi/overseas-stock/v1/trading/order", tr_id, body)
+    if str(data.get("rt_cd", "0")) not in ("0", ""):
+        raise RuntimeError(
+            f"매도실패 [{data.get('msg_cd')}] {data.get('msg1')} ({symbol})"
+        )
+    return data
 
 
 def _parse_rank_rows(rows: list, *, name_keys: tuple[str, ...] = ("name", "knam", "ename", "enam")) -> list[dict]:

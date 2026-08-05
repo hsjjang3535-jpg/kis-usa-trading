@@ -59,3 +59,34 @@ def notify_sim_sell(
         f"{reason}\n"
         f"⚠️ 시뮬만 — 실제 주문 없음"
     )
+
+
+def notify_live_buy(symbol: str, exchange: str, qty: int, price: float, reason: str) -> None:
+    send(
+        f"🇺🇸🔴 <b>[US 실전] 매수</b>\n"
+        f"{symbol} ({exchange})\n"
+        f"{qty}주 @ ${price:.2f}\n"
+        f"{reason}\n"
+        f"⚠️ 실주문 — 세션당 1종목(방식 A)"
+    )
+
+
+def notify_live_sell(
+    symbol: str,
+    exchange: str,
+    qty: int,
+    buy: float,
+    sell: float,
+    pct: float,
+    reason: str,
+) -> None:
+    emoji = "📈" if pct >= 0 else "📉"
+    sign = "+" if pct >= 0 else ""
+    send(
+        f"🇺🇸{emoji} <b>[US 실전] 매도</b>\n"
+        f"{symbol} ({exchange})\n"
+        f"{qty}주 ${buy:.2f} → ${sell:.2f}\n"
+        f"{sign}{pct:.2f}%\n"
+        f"{reason}\n"
+        f"⚠️ 실주문 청산"
+    )

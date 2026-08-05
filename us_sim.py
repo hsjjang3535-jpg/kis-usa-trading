@@ -6,7 +6,11 @@
   2) ORB — 개장 N분 레인지 고가 돌파 + RVOL + VWAP 위
   3) S·RVOL — 일봉 모멘텀 + 시간보정 RVOL + VWAP 위
 
-청산: -2% 손절 / +5% 후 트레일 -0.6% / 정규장 종료 강제청산
+청산: -2% 손절 / +5% 익절 (하드) / 정규장 종료 강제청산
+
+방식 A 실전:
+  ENABLE_US_LIVE_ORDERS=true 이면 세션당 첫 진입만 실주문,
+  이후(청산 후 포함) 신호는 시뮬만.
 """
 from __future__ import annotations
 
@@ -17,10 +21,11 @@ import market_hours
 import us_screener
 
 ENABLED = os.getenv("ENABLE_US_SIM", "true").lower() == "true"
+LIVE_ORDERS = os.getenv("ENABLE_US_LIVE_ORDERS", "false").lower() == "true"
 SIM_AMOUNT_USD = float(os.getenv("US_SIM_AMOUNT_USD", "500"))
+LIVE_AMOUNT_USD = float(os.getenv("US_LIVE_AMOUNT_USD", "200"))
 STOP_LOSS_PCT = float(os.getenv("US_SIM_STOP_LOSS_PCT", "2.0"))
 TAKE_PROFIT_PCT = float(os.getenv("US_SIM_TAKE_PROFIT_PCT", "5.0"))
-TRAILING_STOP_PCT = float(os.getenv("US_SIM_TRAILING_STOP_PCT", "0.6"))
 MIN_DAY_PCT = float(os.getenv("US_SIM_MIN_DAY_PCT", "3.0"))
 MIN_RVOL = float(os.getenv("US_SIM_MIN_RVOL", os.getenv("US_SIM_MIN_VOL_RATIO", "2.5")))
 VOL_AVG_DAYS = int(os.getenv("US_SIM_VOL_AVG_DAYS", "20"))
@@ -45,6 +50,7 @@ GAP_ENTRY_UNTIL = int(os.getenv("US_GAP_ENTRY_UNTIL_MIN", "90"))
 _open: dict | None = None
 _trades_today: list[dict] = []
 _bought_symbols_today: set[str] = set()
+_live_used_today = False  # 방식 A: 세션당 실전 1회 소진
 # symbol -> {high, low, ready, date}
 _orb_ranges: dict[str, dict] = {}
 # 폴링당 VWAP 캐시
@@ -76,13 +82,14 @@ def dump_state() -> dict:
         "open": dict(_open) if _open else None,
         "trades_today": list(_trades_today),
         "bought_symbols_today": sorted(_bought_symbols_today),
+        "live_used_today": _live_used_today,
         "orb_ranges": dict(_orb_ranges),
         "date": market_hours.trading_day_ny(),
     }
 
 
 def load_state(data: dict | None) -> None:
-    global _open, _trades_today, _bought_symbols_today, _orb_ranges
+    global _open, _trades_today, _bought_symbols_today, _orb_ranges, _live_used_today
     if not isinstance(data, dict):
         return
     today = market_hours.trading_day_ny()
@@ -90,21 +97,34 @@ def load_state(data: dict | None) -> None:
     if data.get("date") == today:
         _trades_today = list(data.get("trades_today") or [])
         _bought_symbols_today = set(data.get("bought_symbols_today") or [])
+        _live_used_today = bool(data.get("live_used_today"))
         raw_orb = data.get("orb_ranges") or {}
         _orb_ranges = dict(raw_orb) if isinstance(raw_orb, dict) else {}
     else:
         _trades_today = []
         _bought_symbols_today = set()
+        _live_used_today = False
         _orb_ranges = {}
 
 
 def reset_daily() -> None:
-    global _open, _trades_today, _bought_symbols_today, _orb_ranges, _vwap_cache
+    global _open, _trades_today, _bought_symbols_today, _orb_ranges, _vwap_cache, _live_used_today
     _open = None
     _trades_today = []
     _bought_symbols_today = set()
+    _live_used_today = False
     _orb_ranges = {}
     _vwap_cache = {}
+
+
+def live_slot_available() -> bool:
+    """방식 A: 아직 세션 실전 슬롯 남음."""
+    return LIVE_ORDERS and not _live_used_today
+
+
+def mark_live_used() -> None:
+    global _live_used_today
+    _live_used_today = True
 
 
 def _rsi(closes_latest_first: list[float], period: int = 14) -> float:
@@ -314,22 +334,20 @@ def _match_gap_and_go(
     )
 
 
-def _qty(price: float) -> int:
+def _qty(price: float, *, live: bool) -> int:
     if price <= 0:
         return 0
-    return max(int(SIM_AMOUNT_USD // price), 1)
+    budget = LIVE_AMOUNT_USD if live else SIM_AMOUNT_USD
+    return max(int(budget // price), 1)
 
 
 def _evaluate_exit(pos: dict, price: float) -> tuple[bool, str]:
     buy = float(pos["buy_price"])
     pct = (price - buy) / buy * 100 if buy > 0 else 0
     if pct <= -STOP_LOSS_PCT:
-        return True, f"손절 ({pct:.1f}%)"
-    peak = float(pos.get("peak_price", buy))
-    peak_pct = (peak - buy) / buy * 100 if buy > 0 else 0
-    drop = (peak - price) / peak * 100 if peak > 0 else 0
-    if peak_pct >= TAKE_PROFIT_PCT and drop >= TRAILING_STOP_PCT:
-        return True, f"트레일링 (+{pct:.1f}% / 고점 {peak_pct:.1f}%에서 -{drop:.1f}%)"
+        return True, f"손절 ({pct:.1f}% ≤ -{STOP_LOSS_PCT:g}%)"
+    if pct >= TAKE_PROFIT_PCT:
+        return True, f"익절 ({pct:.1f}% ≥ +{TAKE_PROFIT_PCT:g}%)"
     return False, ""
 
 
@@ -351,6 +369,7 @@ def force_close(price: float, reason: str) -> dict | None:
         "profit_pct": round(pct, 2),
         "sell_reason": reason,
         "strategy": pos.get("strategy", ""),
+        "is_live": bool(pos.get("is_live")),
     }
     _trades_today.append(trade)
     _open = None
@@ -428,7 +447,8 @@ def run_check() -> list[dict]:
         if not ok:
             continue
 
-        qty = _qty(price)
+        want_live = live_slot_available()
+        qty = _qty(price, live=want_live)
         if qty < 1:
             continue
         _open = {
@@ -439,6 +459,7 @@ def run_check() -> list[dict]:
             "peak_price": price,
             "buy_reason": reason,
             "strategy": strategy,
+            "is_live": want_live,  # trader가 실주문 성공 시 유지, 실패 시 False로 강등
         }
         _bought_symbols_today.add(symbol)
         events.append({
@@ -449,6 +470,7 @@ def run_check() -> list[dict]:
             "price": price,
             "reason": reason,
             "strategy": strategy,
+            "is_live": want_live,
         })
         break  # 1포지션
     return events
@@ -465,21 +487,27 @@ def format_summary() -> list[str]:
         rules.append(f"S(RVOL≥{MIN_RVOL:g})")
     if REQUIRE_ABOVE_VWAP:
         rules.append("VWAP↑")
+    rules.append(f"익절+{TAKE_PROFIT_PCT:g}%/손절-{STOP_LOSS_PCT:g}%")
+    if LIVE_ORDERS:
+        slot = "실전슬롯소진" if _live_used_today else "실전1회가능"
+        rules.append(slot)
     if rules:
         lines.append("🇺🇸 규칙: " + " + ".join(rules))
     if _trades_today:
-        lines.append(f"🇺🇸 US 시뮬 오늘 체결 {len(_trades_today)}건")
+        lines.append(f"🇺🇸 US 오늘 체결 {len(_trades_today)}건")
         for t in _trades_today:
             s = "+" if t["profit_pct"] >= 0 else ""
             tag = t.get("strategy") or ""
+            mode = "실전" if t.get("is_live") else "시뮬"
             lines.append(
-                f"  {tag+' ' if tag else ''}{t['symbol']} "
+                f"  [{mode}] {tag+' ' if tag else ''}{t['symbol']} "
                 f"${t['buy_price']:.2f}→${t['sell_price']:.2f} {s}{t['profit_pct']}%"
             )
     if _open:
         tag = _open.get("strategy") or ""
+        mode = "실전" if _open.get("is_live") else "시뮬"
         lines.append(
-            f"🇺🇸 US 시뮬 보유 {tag+' ' if tag else ''}{_open['symbol']} "
+            f"🇺🇸 US 보유 [{mode}] {tag+' ' if tag else ''}{_open['symbol']} "
             f"${_open['buy_price']:.2f} × {_open['quantity']}"
         )
     return lines

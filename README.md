@@ -6,11 +6,11 @@
 
 - KIS 해외주식 시세/일봉 조회
 - 미국 정규장(ET 09:30~16:00, 서머타임 자동) 감지
-- **시뮬만** 기본: **Gap&Go → ORB → S(RVOL)** + **VWAP 위 필터**
+- **시뮬 + 방식A 실전(옵션)**: 세션당 첫 1종목만 실주문, 이후 시뮬 / 익절 +5% · 손절 −2%
 - **동적 워치**: KIS 나스닥 거래량급증·상승률 **순위 API**에서 필터 후 TOP10 (티커 전수 스캔 아님, 메가캡 제외)
 - `/health` HTTP (Railway)
 - 텔레그램 시작/스크리너/체결/하트비트 알림
-- `ENABLE_US_LIVE_ORDERS=false` (실주문 기본 OFF)
+- `ENABLE_US_LIVE_ORDERS=false` (켤 때만 실주문)
 
 ## Railway 배포
 
@@ -33,6 +33,5 @@ python trader.py
 
 ## 다음 단계 (원하면)
 
-- 실전 매수/매도 연결 (`ENABLE_US_LIVE_ORDERS`)
 - 프리장/애프터장
 - 종목별 규칙·백테스트
