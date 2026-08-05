@@ -20,7 +20,7 @@
 |----------|--------|------|
 | `ENABLE_US_SIM` | `true` | 미국 시뮬 ON |
 | `ENABLE_US_LIVE_ORDERS` | `false` | 방식A: 세션당 첫 1종목만 실주문 |
-| `US_LIVE_AMOUNT_USD` | `200` | 실전 1회 매수 예산(USD) |
+| `US_LIVE_AMOUNT_USD` | `500` (미설정 시 시뮬과 동일) | 실전 1회 매수 예산(USD) |
 | `US_DYNAMIC_WATCHLIST` | `true` | 동적 스크리너 (거래량급증+상승률 순위→TOP N) |
 | `US_MAX_WATCHLIST` | `10` | 동적 후보 상위 N |
 | `US_SCREEN_MIN_RATE` | `2.0` | 스크린 등락률 하한(%) |

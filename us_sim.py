@@ -23,7 +23,7 @@ import us_screener
 ENABLED = os.getenv("ENABLE_US_SIM", "true").lower() == "true"
 LIVE_ORDERS = os.getenv("ENABLE_US_LIVE_ORDERS", "false").lower() == "true"
 SIM_AMOUNT_USD = float(os.getenv("US_SIM_AMOUNT_USD", "500"))
-LIVE_AMOUNT_USD = float(os.getenv("US_LIVE_AMOUNT_USD", "200"))
+LIVE_AMOUNT_USD = float(os.getenv("US_LIVE_AMOUNT_USD", os.getenv("US_SIM_AMOUNT_USD", "500")))
 STOP_LOSS_PCT = float(os.getenv("US_SIM_STOP_LOSS_PCT", "2.0"))
 TAKE_PROFIT_PCT = float(os.getenv("US_SIM_TAKE_PROFIT_PCT", "5.0"))
 MIN_DAY_PCT = float(os.getenv("US_SIM_MIN_DAY_PCT", "3.0"))
