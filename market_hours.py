@@ -80,3 +80,9 @@ def session_label() -> str:
     if t < REGULAR_OPEN:
         return "장전"
     return "장후"
+
+
+def trading_day_ny(dt: datetime | None = None) -> str:
+    """미국 세션일 (America/New_York 달력일). KST 자정과 무관."""
+    d = dt or now_ny()
+    return d.strftime("%Y-%m-%d")

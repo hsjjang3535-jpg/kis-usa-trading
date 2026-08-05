@@ -41,9 +41,14 @@ def _today_kst() -> str:
     return datetime.now(KST).strftime("%Y-%m-%d")
 
 
+def _trading_day() -> str:
+    """미국 세션일 (NY). 매매·재매수 금지 일별 키."""
+    return market_hours.trading_day_ny()
+
+
 def _save_state() -> None:
     state = {
-        "date": _today_kst(),
+        "date": _trading_day(),
         "us_sim": us_sim.dump_state(),
     }
     try:
@@ -69,11 +74,11 @@ def _load_state() -> None:
 
 
 def _reset_if_new_day() -> None:
-    today = _today_kst()
+    today = _trading_day()
     if _last_ran.get("date") and _last_ran["date"] != today:
         us_sim.reset_daily()
         _save_state()
-        print(f"[일별 초기화] {today}")
+        print(f"[일별 초기화] US세션일 {today} (NY)")
     _last_ran["date"] = today
 
 

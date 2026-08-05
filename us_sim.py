@@ -11,14 +11,10 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime
-from zoneinfo import ZoneInfo
 
 import kis_us_api
 import market_hours
 import us_screener
-
-KST = ZoneInfo("Asia/Seoul")
 
 ENABLED = os.getenv("ENABLE_US_SIM", "true").lower() == "true"
 SIM_AMOUNT_USD = float(os.getenv("US_SIM_AMOUNT_USD", "500"))
@@ -81,7 +77,7 @@ def dump_state() -> dict:
         "trades_today": list(_trades_today),
         "bought_symbols_today": sorted(_bought_symbols_today),
         "orb_ranges": dict(_orb_ranges),
-        "date": datetime.now(KST).strftime("%Y-%m-%d"),
+        "date": market_hours.trading_day_ny(),
     }
 
 
@@ -89,7 +85,7 @@ def load_state(data: dict | None) -> None:
     global _open, _trades_today, _bought_symbols_today, _orb_ranges
     if not isinstance(data, dict):
         return
-    today = datetime.now(KST).strftime("%Y-%m-%d")
+    today = market_hours.trading_day_ny()
     _open = data.get("open") if isinstance(data.get("open"), dict) else None
     if data.get("date") == today:
         _trades_today = list(data.get("trades_today") or [])
