@@ -102,8 +102,9 @@ def _run_screen(force: bool = False, *, notify: bool = False) -> None:
                 warn = "\n⚠️ 순위 풀 비어 중형 폴백 사용"
             notifier.send(
                 f"🇺🇸 <b>US 스크리너</b> ({mode})\n"
-                f"순위API→필터→TOP{us_screener.MAX_WATCH} · "
+                f"유동 {len(wl)}/{us_screener.MAX_WATCH} · "
                 f"등락≥{stats.get('min_rate', '?')}% · "
+                f"점수≥{stats.get('min_score', '?')} · "
                 f"메가제외 {stats.get('mega_excluded', '?')} · "
                 f"매매가능 {tcount}\n"
                 f"{preview}"

@@ -412,6 +412,14 @@ def _parse_rank_rows(rows: list, *, name_keys: tuple[str, ...] = ("name", "knam"
                     a_tvol = float(r.get("a_tvol"))
                 except (TypeError, ValueError):
                     a_tvol = 0.0
+            tpow = 0.0
+            for pk in ("tpow", "powx"):
+                if r.get(pk) not in (None, ""):
+                    try:
+                        tpow = float(r.get(pk))
+                        break
+                    except (TypeError, ValueError):
+                        continue
             rank = 0
             if r.get("rank") not in (None, ""):
                 try:
@@ -427,6 +435,7 @@ def _parse_rank_rows(rows: list, *, name_keys: tuple[str, ...] = ("name", "knam"
                 "volume": tvol,
                 "avg_volume": a_tvol,
                 "surge_rate": surge,
+                "buy_power": tpow,
                 "mktcap": tomv,
                 "rank": rank,
                 "tradable": str(r.get("e_ordyn") or "Y").upper() in ("Y", "YES", ""),
@@ -506,6 +515,68 @@ def get_market_cap(exchange: str = "NAS", *, vol_rang: str = "0") -> list[dict]:
             "KEYB": "",
             "AUTH": "",
             "EXCD": exchange.upper(),
+            "VOL_RANG": vol_rang,
+        },
+        kind="market",
+    )
+    return _parse_rank_rows(_rank_rows(data))
+
+
+def get_trade_pbmn(exchange: str = "NAS", *, vol_rang: str = "3") -> list[dict]:
+    """해외주식 거래대금 순위."""
+    data = _get(
+        "/uapi/overseas-stock/v1/ranking/trade-pbmn",
+        "HHDFS76320010",
+        {
+            "KEYB": "",
+            "AUTH": "",
+            "EXCD": exchange.upper(),
+            "NDAY": "0",
+            "VOL_RANG": vol_rang,
+            "PRC1": "",
+            "PRC2": "",
+        },
+        kind="market",
+    )
+    return _parse_rank_rows(_rank_rows(data))
+
+
+def get_volume_power(exchange: str = "NAS", *, nday: str = "3", vol_rang: str = "3") -> list[dict]:
+    """해외주식 매수체결강도 상위. nday=3 → 약 5분전 기준."""
+    data = _get(
+        "/uapi/overseas-stock/v1/ranking/volume-power",
+        "HHDFS76280000",
+        {
+            "KEYB": "",
+            "AUTH": "",
+            "EXCD": exchange.upper(),
+            "NDAY": nday,
+            "VOL_RANG": vol_rang,
+        },
+        kind="market",
+    )
+    return _parse_rank_rows(_rank_rows(data))
+
+
+def get_new_highlow(
+    exchange: str = "NAS",
+    *,
+    gubn: str = "1",
+    gubn2: str = "1",
+    nday: str = "0",
+    vol_rang: str = "3",
+) -> list[dict]:
+    """해외주식 신고(gubn=1)/신저(gubn=0). nday=0 → 5일."""
+    data = _get(
+        "/uapi/overseas-stock/v1/ranking/new-highlow",
+        "HHDFS76300000",
+        {
+            "KEYB": "",
+            "AUTH": "",
+            "EXCD": exchange.upper(),
+            "GUBN": gubn,
+            "GUBN2": gubn2,
+            "NDAY": nday,
             "VOL_RANG": vol_rang,
         },
         kind="market",

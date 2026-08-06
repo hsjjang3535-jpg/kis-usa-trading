@@ -21,13 +21,15 @@
 | `ENABLE_US_SIM` | `true` | 미국 시뮬 ON |
 | `ENABLE_US_LIVE_ORDERS` | `false` | 방식A: 세션당 첫 1종목만 실주문 |
 | `US_LIVE_AMOUNT_USD` | `500` (미설정 시 시뮬과 동일) | 실전 1회 매수 예산(USD) |
-| `US_DYNAMIC_WATCHLIST` | `true` | 동적 스크리너 (거래량급증+상승률 순위→TOP N) |
-| `US_MAX_WATCHLIST` | `10` | 동적 후보 상위 N |
+| `US_DYNAMIC_WATCHLIST` | `true` | 동적 스크리너 |
+| `US_MAX_WATCHLIST` | `10` | 유동 후보 상한 (점수 통과분만, 억지 채움 없음) |
+| `US_SCREEN_MIN_SCORE` | `2.0` | 유동 TOP 점수 하한 |
 | `US_SCREEN_MIN_RATE` | `2.0` | 스크린 등락률 하한(%) |
 | `US_SCREEN_INTERVAL_MIN` | `30` | 후보 재갱신 주기(분) |
+| `US_SCREEN_INCLUDE_NYS` | `true` | 뉴욕 순위 합치기 |
 | `US_EXCLUDE_MEGA_CAP` | `true` | 시총 상위·초대형 블록 제외 |
 | `US_MEGA_CAP_RANK_CUTOFF` | `50` | 시총순위 이내 제외 |
-| `US_FALLBACK_WATCHLIST` | `SOFI:NAS,...` | 순위 실패 시 중형 폴백 (메가캡 금지) |
+| `US_FALLBACK_WATCHLIST` | `SOFI:NAS,...` | 1·2차 순위 모두 실패 시에만 |
 | `US_SCREEN_MIN_RATE_RELAXED` | `0.5` | 풀 비면 등락 하한 완화 |
 | `ENABLE_US_S_RULE` | `true` | S·RVOL 규칙 |
 | `ENABLE_US_ORB` | `true` | ORB(오프닝 레인지 돌파) |

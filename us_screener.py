@@ -1,19 +1,15 @@
 """
-미국주식 동적 스크리너 (국내장 스크리너와 같은 역할)
+미국주식 동적 스크리너
 
-후보 소스 (KIS 해외 순위 API — 거래소 전종목 순위표에서 상위권):
-  1) 거래량급증 상위
-  2) 상승률 상위
-  3) 거래량 상위 (보조)
-  ※ 티커 전수 스캔이 아니라, KIS가 주는 순위 리스트에서 필터 후 TOP N
+1차: 거래량급증 + 상승률 + 거래량 순위
+2차(비면): 거래대금 + 매수체결강도 + 신고가 순위
+3차: 등락/거래량조건 완화 후 재시도
+최후: 중형 고정 폴백 (거의 안 쓰이게)
 
-필터:
-  - 당일 등락률 하한 / 최소 가격 / 매매가능
-  - 시가총액 상위(메가캡) 제외
-최종:
-  - 점수 순 TOP N
-  - 비면 등락 하한 완화 재시도 → 그래도 없으면 중형 폴백
-  ※ AAPL 등 메가캡 고정 폴백은 쓰지 않음 (메가제외와 충돌)
+유동 TOP N:
+  - 상한 MAX_WATCH (기본 10)
+  - 점수(등락·급증·체결강도)가 MIN_SCORE 이상인 종목만 채택
+  -  qualifying 이 3개면 3개만 — 억지로 10개 채우지 않음
 """
 from __future__ import annotations
 
@@ -27,15 +23,19 @@ KST = ZoneInfo("Asia/Seoul")
 
 DYNAMIC = os.getenv("US_DYNAMIC_WATCHLIST", "true").lower() == "true"
 MAX_WATCH = int(os.getenv("US_MAX_WATCHLIST", "10"))
+MIN_WATCH = int(os.getenv("US_MIN_WATCHLIST", "1"))  # 유동 하한(정보용, 패딩 안 함)
 MIN_RATE = float(os.getenv("US_SCREEN_MIN_RATE", "2.0"))
 MIN_RATE_RELAXED = float(os.getenv("US_SCREEN_MIN_RATE_RELAXED", "0.5"))
+MIN_SCORE = float(os.getenv("US_SCREEN_MIN_SCORE", "2.0"))  # 유동 TOP 점수 하한
+MIN_SCORE_RELAXED = float(os.getenv("US_SCREEN_MIN_SCORE_RELAXED", "0.5"))
 MIN_PRICE = float(os.getenv("US_SCREEN_MIN_PRICE", "5.0"))
-VOL_RANG = os.getenv("US_SCREEN_VOL_RANG", "3")  # 1만주 이상
-INCLUDE_NYS = os.getenv("US_SCREEN_INCLUDE_NYS", "false").lower() == "true"
+VOL_RANG = os.getenv("US_SCREEN_VOL_RANG", "3")
+VOL_RANG_RELAXED = os.getenv("US_SCREEN_VOL_RANG_RELAXED", "0")
+INCLUDE_NYS = os.getenv("US_SCREEN_INCLUDE_NYS", "true").lower() == "true"
 SCREEN_INTERVAL_MIN = int(os.getenv("US_SCREEN_INTERVAL_MIN", "30"))
 EXCLUDE_MEGA = os.getenv("US_EXCLUDE_MEGA_CAP", "true").lower() == "true"
 MEGA_RANK_CUTOFF = int(os.getenv("US_MEGA_CAP_RANK_CUTOFF", "50"))
-# 시총 순위 API 실패 시 하드 블록 (초대형)
+
 _DEFAULT_MEGA = (
     "AAPL,MSFT,NVDA,GOOGL,GOOG,AMZN,META,TSLA,BRK.B,BRKB,"
     "AVGO,JPM,V,UNH,XOM,MA,LLY,JNJ,WMT,PG"
@@ -45,7 +45,6 @@ MEGA_BLOCKLIST = {
     for s in os.getenv("US_MEGA_CAP_BLOCKLIST", _DEFAULT_MEGA).split(",")
     if s.strip()
 }
-# 메가캡 제외 시 쓰는 중형 폴백 (초대형 금지)
 _DEFAULT_MID_FALLBACK = (
     "SOFI:NAS,PLTR:NAS,RIVN:NAS,MARA:NAS,COIN:NAS,"
     "HOOD:NAS,UBER:NAS,SNAP:NAS,DKNG:NAS,PATH:NAS"
@@ -83,9 +82,7 @@ def _parse_watch_env(raw: str) -> list[dict]:
 
 
 def _fallback_watchlist() -> list[dict]:
-    """메가캡과 충돌하지 않는 폴백."""
     raw = os.getenv("US_FALLBACK_WATCHLIST") or os.getenv("US_WATCHLIST", "")
-    # 구 US_WATCHLIST가 AAPL 등이면 메가 필터 후 비게 됨 → 중형 기본
     items = _parse_watch_env(raw) if raw else []
     if not items:
         items = _parse_watch_env(
@@ -121,20 +118,25 @@ def format_watchlist_preview(limit: int = 8) -> str:
     parts = []
     for w in wl[:limit]:
         rate = w.get("rate")
+        src = w.get("source") or ""
+        tag = f"/{src[:4]}" if src and src != "fallback" else ""
         if rate:
-            parts.append(f"{w['symbol']}({float(rate):+.1f}%)")
+            parts.append(f"{w['symbol']}({float(rate):+.1f}%{tag})")
         else:
-            parts.append(str(w["symbol"]))
+            parts.append(f"{w['symbol']}{tag}")
     extra = "…" if len(wl) > limit else ""
     return ", ".join(parts) + extra
 
 
 def _score(item: dict) -> float:
-    return float(item.get("rate") or 0) + min(float(item.get("surge_rate") or 0) / 10.0, 20.0)
+    """등락 + 급증 + 체결강도 가점."""
+    rate = float(item.get("rate") or 0)
+    surge = min(float(item.get("surge_rate") or 0) / 10.0, 20.0)
+    power = min(float(item.get("buy_power") or 0) / 20.0, 10.0)
+    return rate + surge + power
 
 
 def _refresh_mega_set(exchanges: list[str]) -> int:
-    """시가총액 순위 상위 → 메가캡 제외 집합."""
     global _mega_symbols
     mega: set[str] = set(MEGA_BLOCKLIST) if EXCLUDE_MEGA else set()
     if not EXCLUDE_MEGA:
@@ -172,6 +174,7 @@ def _merge_pool(rows: list[dict], source: str, *, min_rate: float) -> dict[str, 
             "last": r.get("last"),
             "rate": float(r.get("rate") or 0),
             "surge_rate": float(r.get("surge_rate") or 0),
+            "buy_power": float(r.get("buy_power") or 0),
             "volume": r.get("volume"),
             "avg_volume": r.get("avg_volume"),
             "mktcap": r.get("mktcap"),
@@ -183,29 +186,97 @@ def _merge_pool(rows: list[dict], source: str, *, min_rate: float) -> dict[str, 
     return pool
 
 
-def _collect_raw(exchanges: list[str]) -> tuple[list[dict], list[dict], list[dict], list[str]]:
-    surge_all: list[dict] = []
-    up_all: list[dict] = []
-    vol_all: list[dict] = []
+def _select_fluid(pool: dict[str, dict], *, min_score: float) -> list[dict]:
+    """점수 통과 종목만 최대 MAX_WATCH — 부족해도 억지로 채우지 않음."""
+    ranked = sorted(pool.values(), key=_score, reverse=True)
+    picked = [x for x in ranked if _score(x) >= min_score][:MAX_WATCH]
+    if len(picked) < MIN_WATCH and ranked:
+        # 하한만 살짝: 점수순으로 MIN_WATCH까지 (그래도 MAX 초과 금지)
+        need = min(MIN_WATCH, MAX_WATCH, len(ranked))
+        if len(picked) < need:
+            seen = {f"{p['exchange']}:{p['symbol']}" for p in picked}
+            for x in ranked:
+                key = f"{x['exchange']}:{x['symbol']}"
+                if key in seen:
+                    continue
+                picked.append(x)
+                seen.add(key)
+                if len(picked) >= need:
+                    break
+    return picked
+
+
+def _collect_primary(exchanges: list[str], vol_rang: str) -> tuple[dict, dict, list[str]]:
+    """1차: 급증·상승·거래량."""
+    counts = {"surge": 0, "updown": 0, "tradevol": 0}
     errors: list[str] = []
+    pool: dict[str, dict] = {}
     for ex in exchanges:
         try:
-            surge_all.extend(kis_us_api.get_volume_surge(ex, mixn="3", vol_rang=VOL_RANG))
+            rows = kis_us_api.get_volume_surge(ex, mixn="3", vol_rang=vol_rang)
+            counts["surge"] += len(rows)
+            pool.update(_merge_pool(rows, "volume_surge", min_rate=-999))  # rate는 나중에
         except Exception as e:
             errors.append(f"surge:{ex}:{e}")
         try:
-            up_all.extend(kis_us_api.get_updown_rate(ex, gubn="1", vol_rang=VOL_RANG))
+            rows = kis_us_api.get_updown_rate(ex, gubn="1", vol_rang=vol_rang)
+            counts["updown"] += len(rows)
+            pool.update(_merge_pool(rows, "updown", min_rate=-999))
         except Exception as e:
             errors.append(f"updown:{ex}:{e}")
         try:
-            vol_all.extend(kis_us_api.get_trade_vol(ex, vol_rang=VOL_RANG))
+            rows = kis_us_api.get_trade_vol(ex, vol_rang=vol_rang)
+            counts["tradevol"] += len(rows)
+            pool.update(_merge_pool(rows, "trade_vol", min_rate=-999))
         except Exception as e:
             errors.append(f"tradevol:{ex}:{e}")
-    return surge_all, up_all, vol_all, errors
+    return pool, counts, errors
+
+
+def _collect_secondary(exchanges: list[str], vol_rang: str) -> tuple[dict, dict, list[str]]:
+    """2차: 거래대금·체결강도·신고가."""
+    counts = {"pbmn": 0, "power": 0, "highlow": 0}
+    errors: list[str] = []
+    pool: dict[str, dict] = {}
+    for ex in exchanges:
+        try:
+            rows = kis_us_api.get_trade_pbmn(ex, vol_rang=vol_rang)
+            counts["pbmn"] += len(rows)
+            pool.update(_merge_pool(rows, "trade_pbmn", min_rate=-999))
+        except Exception as e:
+            errors.append(f"pbmn:{ex}:{e}")
+        try:
+            rows = kis_us_api.get_volume_power(ex, nday="3", vol_rang=vol_rang)
+            counts["power"] += len(rows)
+            pool.update(_merge_pool(rows, "volume_power", min_rate=-999))
+        except Exception as e:
+            errors.append(f"power:{ex}:{e}")
+        try:
+            rows = kis_us_api.get_new_highlow(
+                ex, gubn="1", gubn2="1", nday="0", vol_rang=vol_rang,
+            )
+            counts["highlow"] += len(rows)
+            pool.update(_merge_pool(rows, "new_high", min_rate=-999))
+        except Exception as e:
+            errors.append(f"highlow:{ex}:{e}")
+    return pool, counts, errors
+
+
+def _filter_pool(raw_pool: dict[str, dict], *, min_rate: float) -> dict[str, dict]:
+    out: dict[str, dict] = {}
+    for key, item in raw_pool.items():
+        if float(item.get("rate") or 0) < min_rate:
+            continue
+        if float(item.get("last") or 0) < MIN_PRICE:
+            continue
+        if is_mega_cap(item["symbol"]):
+            continue
+        out[key] = item
+    return out
 
 
 def run_screening(force: bool = False) -> list[dict]:
-    """동적 워치리스트 갱신. 반환: 최종 후보."""
+    """동적·유동 워치리스트 갱신."""
     global _watchlist, _last_screen_at, _last_stats
 
     if not DYNAMIC:
@@ -231,26 +302,57 @@ def run_screening(force: bool = False) -> list[dict]:
         exchanges.append("NYS")
 
     mega_n = _refresh_mega_set(exchanges)
-    surge_all, up_all, vol_all, errors = _collect_raw(exchanges)
-    surge_n, up_n, vol_n = len(surge_all), len(up_all), len(vol_all)
+    errors: list[str] = []
+    counts: dict[str, int] = {}
 
+    # 1차
+    raw1, c1, e1 = _collect_primary(exchanges, VOL_RANG)
+    counts.update(c1)
+    errors.extend(e1)
+    pool = _filter_pool(raw1, min_rate=MIN_RATE)
     used_rate = MIN_RATE
-    pool: dict[str, dict] = {}
-    pool.update(_merge_pool(surge_all, "volume_surge", min_rate=used_rate))
-    pool.update(_merge_pool(up_all, "updown", min_rate=used_rate))
-    pool.update(_merge_pool(vol_all, "trade_vol", min_rate=used_rate))
+    used_score = MIN_SCORE
+    stage = "primary"
 
-    # 개장 직후 등락 부족·메가 위주면 하한 완화 재시도
+    # 1차 완화
     if not pool and MIN_RATE_RELAXED < MIN_RATE:
+        pool = _filter_pool(raw1, min_rate=MIN_RATE_RELAXED)
         used_rate = MIN_RATE_RELAXED
-        pool.update(_merge_pool(surge_all, "volume_surge", min_rate=used_rate))
-        pool.update(_merge_pool(up_all, "updown", min_rate=used_rate))
-        pool.update(_merge_pool(vol_all, "trade_vol", min_rate=used_rate))
+        used_score = MIN_SCORE_RELAXED
+        stage = "primary_relaxed"
 
-    ranked = sorted(pool.values(), key=_score, reverse=True)[:MAX_WATCH]
-    if ranked:
-        _watchlist = ranked
-        mode = "dynamic" if used_rate >= MIN_RATE else "dynamic_relaxed"
+    # 2차 확장 순위
+    if not pool:
+        raw2, c2, e2 = _collect_secondary(exchanges, VOL_RANG)
+        counts.update(c2)
+        errors.extend(e2)
+        pool = _filter_pool(raw2, min_rate=MIN_RATE_RELAXED)
+        used_rate = MIN_RATE_RELAXED
+        used_score = MIN_SCORE_RELAXED
+        stage = "secondary"
+        # 2차도 비면 거래량조건 완화
+        if not pool and VOL_RANG_RELAXED != VOL_RANG:
+            raw2b, c2b, e2b = _collect_secondary(exchanges, VOL_RANG_RELAXED)
+            for k, v in c2b.items():
+                counts[k] = counts.get(k, 0) + v
+            errors.extend(e2b)
+            pool = _filter_pool(raw2b, min_rate=0.0)
+            used_rate = 0.0
+            used_score = MIN_SCORE_RELAXED
+            stage = "secondary_relaxed"
+
+    picked = _select_fluid(pool, min_score=used_score)
+    if not picked and pool:
+        picked = _select_fluid(pool, min_score=MIN_SCORE_RELAXED)
+        used_score = MIN_SCORE_RELAXED
+        stage = f"{stage}_score_relaxed"
+    if not picked and pool:
+        # 점수 하한 포기, 상한만 적용 (여전히 그날 순위 기반 · 고정 리스트 아님)
+        picked = sorted(pool.values(), key=_score, reverse=True)[:MAX_WATCH]
+        stage = f"{stage}_topn"
+    if picked:
+        _watchlist = picked
+        mode = f"dynamic_{stage}"
     else:
         _watchlist = _fallback_watchlist()
         mode = "fallback"
@@ -261,18 +363,17 @@ def run_screening(force: bool = False) -> list[dict]:
         "mode": mode,
         "count": len(_watchlist),
         "tradeable": tcount,
-        "surge_raw": surge_n,
-        "updown_raw": up_n,
-        "tradevol_raw": vol_n,
+        "max_watch": MAX_WATCH,
+        "min_score": used_score,
         "pool": len(pool),
         "mega_excluded": mega_n,
         "min_rate": used_rate,
+        "counts": counts,
         "errors": errors[:3],
         "at": now.strftime("%H:%M"),
     }
     print(
-        f"[US스크리너] {mode} TOP{MAX_WATCH}→{len(_watchlist)}종 "
-        f"(급증 {surge_n}/상승 {up_n}/거래량 {vol_n}/풀 {len(pool)}/"
-        f"매매가능 {tcount}/메가집합 {mega_n})"
+        f"[US스크리너] {mode} 유동{len(_watchlist)}/{MAX_WATCH} "
+        f"(풀 {len(pool)} / 매매가능 {tcount} / 메가 {mega_n} / {counts})"
     )
     return list(_watchlist)
