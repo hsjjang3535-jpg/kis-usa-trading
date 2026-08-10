@@ -20,7 +20,7 @@
 |----------|--------|------|
 | `ENABLE_US_SIM` | `true` | 미국 시뮬 ON |
 | `ENABLE_US_LIVE_ORDERS` | `false` | 방식A: 세션당 첫 1종목만 실주문 |
-| `US_LIVE_AMOUNT_USD` | `500` (미설정 시 시뮬과 동일) | 실전 1회 매수 예산(USD) |
+| `US_LIVE_AMOUNT_USD` | `750` (미설정 시 시뮬과 동일) | 실전 1회 매수 예산(USD, ≈100만원) |
 | `US_DYNAMIC_WATCHLIST` | `true` | 동적 스크리너 |
 | `US_MAX_WATCHLIST` | `10` | 유동 후보 상한 (점수 통과분만, 억지 채움 없음) |
 | `US_SCREEN_MIN_SCORE` | `2.0` | 유동 TOP 점수 하한 |
@@ -40,7 +40,7 @@
 | `US_SIM_MIN_RVOL` | `2.5` | S 시간보정 RVOL 하한 |
 | `US_WATCHLIST` | `AAPL:NAS,...` | 동적 실패 시 폴백 / 고정 모드 |
 | `US_POLL_INTERVAL_MIN` | `5` | 정규장 점검 주기(분) |
-| `US_SIM_AMOUNT_USD` | `500` | 시뮬 1회 가상 매수(USD) |
+| `US_SIM_AMOUNT_USD` | `750` | 시뮬 1회 가상 매수(USD, ≈100만원) |
 | `US_SIM_STOP_LOSS_PCT` | `2.0` | 손절 % |
 | `US_SIM_TAKE_PROFIT_PCT` | `5.0` | 익절 % (하드) |
 | `US_HEARTBEAT_HOUR_KST` | `22` | 일일 하트비트(KST) |
