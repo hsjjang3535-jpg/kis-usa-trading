@@ -8,8 +8,8 @@
 
 청산: -2% 손절 / +5% 익절 (하드) / 정규장 종료 강제청산
 
-방식 A: 세션당 첫 진입만 실주문. 주포지션 보유 중에도
-다른 워치 종목은 병렬 시뮬로 진입·알림 가능 (US_PARALLEL_SIM).
+방식 A: 같은 점검에서 조건 통과 종목 중 신호점수 최고 1종만
+세션 실주문(실전 슬롯 1회). 나머지는 병렬 시뮬 (US_PARALLEL_SIM).
 """
 from __future__ import annotations
 
@@ -28,6 +28,8 @@ LIVE_ORDERS = os.getenv("ENABLE_US_LIVE_ORDERS", "false").lower() == "true"
 # 1종목 예산 ≈100만원 (USD, 환율에 따라 변동)
 SIM_AMOUNT_USD = float(os.getenv("US_SIM_AMOUNT_USD", "750"))
 LIVE_AMOUNT_USD = float(os.getenv("US_LIVE_AMOUNT_USD", os.getenv("US_SIM_AMOUNT_USD", "750")))
+# 실전 총 투자 한도 ≈200만원
+MAX_TOTAL_USD = float(os.getenv("US_MAX_TOTAL_USD", "1500"))
 STOP_LOSS_PCT = float(os.getenv("US_SIM_STOP_LOSS_PCT", "2.0"))
 TAKE_PROFIT_PCT = float(os.getenv("US_SIM_TAKE_PROFIT_PCT", "5.0"))
 MIN_DAY_PCT = float(os.getenv("US_SIM_MIN_DAY_PCT", "3.0"))
@@ -139,13 +141,36 @@ def reset_daily() -> None:
 
 
 def live_slot_available() -> bool:
-    """방식 A: 아직 세션 실전 슬롯 남음."""
-    return LIVE_ORDERS and not _live_used_today
+    """방식 A: 아직 세션 실전 슬롯 남음 + 총한도 여유."""
+    if not (LIVE_ORDERS and not _live_used_today):
+        return False
+    return _live_budget_remaining() > 0
+
+
+def _signal_score(strategy: str, *, gap: float = 0.0, day_pct: float = 0.0, rvol: float = 0.0) -> float:
+    """같은 점검 내 실전 후보 순위. 전략 베이스 + 모멘텀/거래량."""
+    base = {"GapGo": 300.0, "ORB": 200.0, "S": 100.0}.get(strategy, 0.0)
+    if strategy == "GapGo":
+        return base + gap * 10.0 + rvol * 20.0
+    if strategy == "ORB":
+        return base + day_pct * 10.0 + rvol * 20.0
+    return base + day_pct * 5.0 + rvol * 10.0
 
 
 def mark_live_used() -> None:
     global _live_used_today
     _live_used_today = True
+
+
+def _live_exposed() -> float:
+    """현재 실전 포지션 평가액(USD)."""
+    if _open and _open.get("is_live"):
+        return float(_open["buy_price"]) * int(_open["quantity"])
+    return 0.0
+
+
+def _live_budget_remaining() -> float:
+    return max(0.0, MAX_TOTAL_USD - _live_exposed())
 
 
 def _record_skip(symbol: str, reason: str) -> None:
@@ -257,33 +282,34 @@ def _match_s_rule(
     *,
     symbol: str,
     exchange: str,
-) -> tuple[bool, str]:
+) -> tuple[bool, str, float]:
     if not ENABLE_S:
-        return False, "S오프"
+        return False, "S오프", 0.0
     if len(daily) < max(60, VOL_AVG_DAYS + 2):
-        return False, "S:일봉부족"
+        return False, "S:일봉부족", 0.0
     closes = [current] + [b["close"] for b in daily[1:]]
     day_pct = _day_pct(daily, current)
     if day_pct < MIN_DAY_PCT:
-        return False, f"S:당일{day_pct:+.1f}%<{MIN_DAY_PCT:g}%"
+        return False, f"S:당일{day_pct:+.1f}%<{MIN_DAY_PCT:g}%", 0.0
     ma20 = sum(closes[:20]) / 20
     if current < ma20:
-        return False, f"S:MA20아래(${ma20:.2f})"
+        return False, f"S:MA20아래(${ma20:.2f})", 0.0
     rsi = _rsi(closes, 14)
     if rsi > MAX_RSI:
-        return False, f"S:RSI{rsi:.0f}>{MAX_RSI:g}"
+        return False, f"S:RSI{rsi:.0f}>{MAX_RSI:g}", 0.0
     check_vol = today_vol if today_vol > 0 else float(daily[0].get("volume") or 0)
     rvol = _rvol(daily, check_vol)
     if rvol < MIN_RVOL:
-        return False, f"S:RVOL{rvol:.1f}x<{MIN_RVOL:g}"
+        return False, f"S:RVOL{rvol:.1f}x<{MIN_RVOL:g}", 0.0
     ok_vwap, vwap = _above_vwap(symbol, exchange, current)
     if not ok_vwap:
-        return False, f"S:VWAP아래(${vwap:.2f})"
+        return False, f"S:VWAP아래(${vwap:.2f})", 0.0
     vwap_txt = f" · VWAP ${vwap:.2f}" if vwap > 0 else ""
+    score = _signal_score("S", day_pct=day_pct, rvol=rvol)
     return True, (
         f"S·RVOL · {day_pct:+.1f}% · RVOL {rvol:.1f}x · "
         f"MA20 ${ma20:.2f} · RSI {rsi:.0f}{vwap_txt}"
-    )
+    ), score
 
 
 def _update_orb(symbol: str, price: float, day_high: float, day_low: float) -> dict | None:
@@ -319,31 +345,32 @@ def _match_orb(
     today_vol: float,
     day_high: float,
     day_low: float,
-) -> tuple[bool, str]:
+) -> tuple[bool, str, float]:
     if not ENABLE_ORB:
-        return False, "ORB오프"
+        return False, "ORB오프", 0.0
     if not market_hours.is_orb_entry_window(ORB_MINUTES, ORB_ENTRY_UNTIL):
-        return False, "ORB:시간외"
+        return False, "ORB:시간외", 0.0
     st = _update_orb(symbol, price, day_high, day_low)
     if not st or not st.get("ready"):
-        return False, "ORB:레인지미확정"
+        return False, "ORB:레인지미확정", 0.0
     or_high = float(st["high"])
     if or_high <= 0 or price < or_high:
-        return False, f"ORB:미돌파(OR고${or_high:.2f})"
+        return False, f"ORB:미돌파(OR고${or_high:.2f})", 0.0
     day_pct = _day_pct(daily, price)
     if day_pct < ORB_MIN_DAY_PCT:
-        return False, f"ORB:당일{day_pct:+.1f}%<{ORB_MIN_DAY_PCT:g}%"
+        return False, f"ORB:당일{day_pct:+.1f}%<{ORB_MIN_DAY_PCT:g}%", 0.0
     rvol = _rvol(daily, today_vol if today_vol > 0 else float(daily[0].get("volume") or 0))
     if rvol < ORB_MIN_RVOL:
-        return False, f"ORB:RVOL{rvol:.1f}x<{ORB_MIN_RVOL:g}"
+        return False, f"ORB:RVOL{rvol:.1f}x<{ORB_MIN_RVOL:g}", 0.0
     ok_vwap, vwap = _above_vwap(symbol, exchange, price)
     if not ok_vwap:
-        return False, f"ORB:VWAP아래(${vwap:.2f})"
+        return False, f"ORB:VWAP아래(${vwap:.2f})", 0.0
     vwap_txt = f" · VWAP ${vwap:.2f}" if vwap > 0 else ""
+    score = _signal_score("ORB", day_pct=day_pct, rvol=rvol)
     return True, (
         f"ORB {ORB_MINUTES}m돌파 · OR고 ${or_high:.2f} · "
         f"{day_pct:+.1f}% · RVOL {rvol:.1f}x{vwap_txt}"
-    )
+    ), score
 
 
 def _match_gap_and_go(
@@ -355,42 +382,48 @@ def _match_gap_and_go(
     today_vol: float,
     day_high: float,
     day_low: float,
-) -> tuple[bool, str]:
+) -> tuple[bool, str, float]:
     """
     Gap & Go: 시가갭 구간 + RVOL + 갭 유지(price≥open) + ORB고 돌파 + VWAP 위.
     """
     if not ENABLE_GAP_GO:
-        return False, "GapGo오프"
+        return False, "GapGo오프", 0.0
     if not market_hours.is_orb_entry_window(ORB_MINUTES, GAP_ENTRY_UNTIL):
-        return False, "GapGo:시간외"
+        return False, "GapGo:시간외", 0.0
     gap = _gap_pct(daily, open_px if open_px > 0 else price)
     if gap < GAP_MIN_PCT or gap > GAP_MAX_PCT:
-        return False, f"GapGo:갭{gap:+.1f}%범위외"
+        return False, f"GapGo:갭{gap:+.1f}%범위외", 0.0
     if open_px > 0 and price < open_px:
-        return False, "GapGo:갭페이드"
+        return False, "GapGo:갭페이드", 0.0
     rvol = _rvol(daily, today_vol if today_vol > 0 else float(daily[0].get("volume") or 0))
     if rvol < GAP_MIN_RVOL:
-        return False, f"GapGo:RVOL{rvol:.1f}x<{GAP_MIN_RVOL:g}"
+        return False, f"GapGo:RVOL{rvol:.1f}x<{GAP_MIN_RVOL:g}", 0.0
     st = _update_orb(symbol, price, day_high, day_low)
     if not st or not st.get("ready"):
-        return False, "GapGo:ORB미확정"
+        return False, "GapGo:ORB미확정", 0.0
     or_high = float(st["high"])
     if or_high <= 0 or price < or_high:
-        return False, f"GapGo:OR미돌파(${or_high:.2f})"
+        return False, f"GapGo:OR미돌파(${or_high:.2f})", 0.0
     ok_vwap, vwap = _above_vwap(symbol, exchange, price)
     if not ok_vwap:
-        return False, f"GapGo:VWAP아래(${vwap:.2f})"
+        return False, f"GapGo:VWAP아래(${vwap:.2f})", 0.0
     vwap_txt = f" · VWAP ${vwap:.2f}" if vwap > 0 else ""
+    score = _signal_score("GapGo", gap=gap, rvol=rvol)
     return True, (
         f"Gap&Go · 갭 {gap:+.1f}% · OR고 ${or_high:.2f} · "
         f"RVOL {rvol:.1f}x{vwap_txt}"
-    )
+    ), score
 
 
 def _qty(price: float, *, live: bool) -> int:
     if price <= 0:
         return 0
-    budget = LIVE_AMOUNT_USD if live else SIM_AMOUNT_USD
+    if live:
+        budget = min(LIVE_AMOUNT_USD, _live_budget_remaining())
+    else:
+        budget = SIM_AMOUNT_USD
+    if budget < price:
+        return 0
     return max(int(budget // price), 1)
 
 
@@ -475,37 +508,37 @@ def _try_entry_signal(
     today_vol: float,
     day_high: float,
     day_low: float,
-) -> tuple[bool, str, str]:
-    """(ok, reason, strategy). 실패 시 reason=스킵 사유."""
+) -> tuple[bool, str, str, float]:
+    """(ok, reason, strategy, score). 실패 시 reason=스킵 사유."""
     building = market_hours.is_orb_building(ORB_MINUTES)
     skips: list[str] = []
 
     if not building:
-        ok, reason = _match_gap_and_go(
+        ok, reason, score = _match_gap_and_go(
             symbol, exchange, daily, price, open_px, today_vol, day_high, day_low,
         )
         if ok:
-            return True, reason, "GapGo"
+            return True, reason, "GapGo", score
         if reason:
             skips.append(reason)
-        ok, reason = _match_orb(
+        ok, reason, score = _match_orb(
             symbol, exchange, daily, price, today_vol, day_high, day_low,
         )
         if ok:
-            return True, reason, "ORB"
+            return True, reason, "ORB", score
         if reason:
             skips.append(reason)
     else:
         skips.append("ORB형성중")
 
-    ok, reason = _match_s_rule(
+    ok, reason, score = _match_s_rule(
         daily, price, today_vol, symbol=symbol, exchange=exchange,
     )
     if ok:
-        return True, reason, "S"
+        return True, reason, "S", score
     if reason:
         skips.append(reason)
-    return False, " / ".join(skips) if skips else "조건미충족", ""
+    return False, " / ".join(skips) if skips else "조건미충족", "", 0.0
 
 
 def _open_position(
@@ -578,7 +611,7 @@ def run_check() -> list[dict]:
             if t:
                 events.append(t)
 
-    # ── 신규 스캔 ───────────────────────────────────────────────
+    # ── 신규 스캔: 전부 평가 후 점수순 배정 ─────────────────────
     held = set()
     if _open:
         held.add(_open["symbol"])
@@ -586,6 +619,7 @@ def run_check() -> list[dict]:
 
     primary_free = _open is None
     paper_slots = MAX_SIM_POSITIONS - len(_paper)
+    candidates: list[dict] = []
 
     for symbol, exchange in _active_watchlist():
         if symbol in _bought_symbols_today or symbol in held:
@@ -613,22 +647,42 @@ def run_check() -> list[dict]:
         if ENABLE_ORB or ENABLE_GAP_GO:
             _update_orb(symbol, price, day_high, day_low)
 
-        ok, reason, strategy = _try_entry_signal(
+        ok, reason, strategy, score = _try_entry_signal(
             symbol, exchange, daily, price, open_px, today_vol, day_high, day_low,
         )
         if not ok:
             _record_skip(symbol, reason)
             continue
+        candidates.append({
+            "symbol": symbol,
+            "exchange": exchange,
+            "price": price,
+            "reason": reason,
+            "strategy": strategy,
+            "score": score,
+        })
 
-        # 주포지션 슬롯 비어 있으면 실전/시뮬 주포지션
+    candidates.sort(key=lambda c: c["score"], reverse=True)
+
+    for c in candidates:
+        symbol = c["symbol"]
+        exchange = c["exchange"]
+        price = c["price"]
+        strategy = c["strategy"]
+        score = c["score"]
+        reason = f"{c['reason']} · 점수{score:.0f}"
+
+        # 점수 최고(남은 후보 중) → 주포지션. 실전 슬롯 있으면 실주문.
         if primary_free:
             want_live = live_slot_available()
+            if want_live and _live_budget_remaining() < price:
+                want_live = False
             pos = _open_position(
                 symbol=symbol, exchange=exchange, price=price,
                 reason=reason, strategy=strategy, live=want_live, paper=False,
             )
             if pos["quantity"] < 1:
-                _record_skip(symbol, "수량0")
+                _record_skip(symbol, "수량0(한도부족)")
                 continue
             _open = pos
             primary_free = False
@@ -641,18 +695,21 @@ def run_check() -> list[dict]:
                 "price": price,
                 "reason": reason,
                 "strategy": strategy,
+                "score": score,
                 "is_live": want_live,
                 "paper": False,
             })
-            # 실전 슬롯 썼으면 이후는 병렬 시뮬만
             continue
 
-        # 주포지션 있는 동안 → 병렬 시뮬
+        # 주포지션 이미 있음 → 병렬 시뮬
         if not PARALLEL_SIM:
-            _record_skip(symbol, f"신호OK·주포지션보유({_open and _open.get('symbol')})")
+            _record_skip(
+                symbol,
+                f"신호OK·점수{score:.0f}·주포지션보유({_open and _open.get('symbol')})",
+            )
             continue
         if paper_slots <= 0:
-            _record_skip(symbol, "신호OK·시뮬한도초과")
+            _record_skip(symbol, f"신호OK·점수{score:.0f}·시뮬한도초과")
             continue
         pos = _open_position(
             symbol=symbol, exchange=exchange, price=price,
@@ -673,6 +730,7 @@ def run_check() -> list[dict]:
             "price": price,
             "reason": pos["buy_reason"],
             "strategy": strategy,
+            "score": score,
             "is_live": False,
             "paper": True,
         })
@@ -695,6 +753,7 @@ def format_summary() -> list[str]:
     if LIVE_ORDERS:
         slot = "실전슬롯소진" if _live_used_today else "실전1회가능"
         rules.append(slot)
+        rules.append(f"실전총한도${MAX_TOTAL_USD:g}")
     if PARALLEL_SIM:
         rules.append(f"병렬시뮬≤{MAX_SIM_POSITIONS}")
     if rules:
