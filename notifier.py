@@ -61,13 +61,25 @@ def notify_sim_sell(
     )
 
 
+def notify_skip_digest(lines: list[str]) -> None:
+    if not lines:
+        return
+    body = "\n".join(lines[:20])
+    more = f"\n… 외 {len(lines) - 20}종" if len(lines) > 20 else ""
+    send(
+        f"🇺🇸📋 <b>US 워치 스킵 요약</b>\n"
+        f"(미진입 사유 · 최근 점검)\n"
+        f"{body}{more}"
+    )
+
+
 def notify_live_buy(symbol: str, exchange: str, qty: int, price: float, reason: str) -> None:
     send(
         f"🇺🇸🔴 <b>[US 실전] 매수</b>\n"
         f"{symbol} ({exchange})\n"
         f"{qty}주 @ ${price:.2f}\n"
         f"{reason}\n"
-        f"⚠️ 실주문 — 세션당 1종목(방식 A)"
+        f"⚠️ 실주문 — 세션당 1종목(방식 A) · 다른 종목은 병렬 시뮬 가능"
     )
 
 

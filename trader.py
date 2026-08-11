@@ -137,7 +137,7 @@ def _check_sim() -> None:
         events = us_sim.run_check()
         for ev in events:
             if ev.get("action") == "buy":
-                is_live = bool(ev.get("is_live"))
+                is_live = bool(ev.get("is_live")) and not ev.get("paper")
                 if is_live:
                     try:
                         order_px = _limit_buy_price(float(ev["price"]))
@@ -163,7 +163,7 @@ def _check_sim() -> None:
                         ev["price"], ev["reason"],
                     )
             elif ev.get("action") == "sell":
-                is_live = bool(ev.get("is_live"))
+                is_live = bool(ev.get("is_live")) and not ev.get("paper")
                 if is_live:
                     try:
                         order_px = _limit_sell_price(float(ev["sell_price"]))
@@ -191,48 +191,69 @@ def _check_sim() -> None:
                     )
         if events:
             _save_state()
+
+        if us_sim.should_notify_skips():
+            digest = us_sim.consume_skip_digest()
+            if digest:
+                notifier.notify_skip_digest(digest)
     except Exception as e:
         print(f"[US시뮬] 오류: {e}")
         notifier.notify_error(f"US 시뮬 오류: {e}")
 
 
 def _session_end_close() -> None:
-    pos = us_sim.get_open()
-    if not pos:
-        return
-    try:
-        px = kis_us_api.get_us_price(pos["symbol"], pos["exchange"])
-        price = float(px["last"]) or float(pos["buy_price"])
-    except Exception:
-        price = float(pos["buy_price"])
-    was_live = bool(pos.get("is_live"))
-    trade = us_sim.force_close(price, "정규장 종료 청산")
-    if not trade:
-        return
-    if was_live:
+    def _px(symbol: str, exchange: str) -> float:
         try:
-            order_px = _limit_sell_price(float(trade["sell_price"]))
-            kis_us_api.sell_us_stock(
-                trade["symbol"], trade["quantity"], order_px, trade["exchange"],
-            )
-            notifier.notify_live_sell(
+            quote = kis_us_api.get_us_price(symbol, exchange)
+            return float(quote["last"]) or 0.0
+        except Exception:
+            return 0.0
+
+    pos = us_sim.get_open()
+    if pos:
+        price = _px(pos["symbol"], pos["exchange"]) or float(pos["buy_price"])
+        was_live = bool(pos.get("is_live"))
+        trade = us_sim.force_close(price, "정규장 종료 청산")
+        if trade:
+            if was_live:
+                try:
+                    order_px = _limit_sell_price(float(trade["sell_price"]))
+                    kis_us_api.sell_us_stock(
+                        trade["symbol"], trade["quantity"], order_px, trade["exchange"],
+                    )
+                    notifier.notify_live_sell(
+                        trade["symbol"], trade["exchange"], trade["quantity"],
+                        trade["buy_price"], trade["sell_price"],
+                        trade["profit_pct"], trade["sell_reason"],
+                    )
+                except Exception as e:
+                    notifier.notify_error(f"정규장종료 실전매도 실패: {e}")
+                    notifier.notify_sim_sell(
+                        trade["symbol"], trade["exchange"], trade["quantity"],
+                        trade["buy_price"], trade["sell_price"],
+                        trade["profit_pct"], trade["sell_reason"] + f" (실주문실패:{e})",
+                    )
+            else:
+                notifier.notify_sim_sell(
+                    trade["symbol"], trade["exchange"], trade["quantity"],
+                    trade["buy_price"], trade["sell_price"],
+                    trade["profit_pct"], trade["sell_reason"],
+                )
+
+    for sym, ppos in list(us_sim.get_paper_positions().items()):
+        price = _px(sym, ppos["exchange"]) or float(ppos["buy_price"])
+        trade = us_sim.force_close_paper(sym, price, "정규장 종료 청산")
+        if trade:
+            notifier.notify_sim_sell(
                 trade["symbol"], trade["exchange"], trade["quantity"],
                 trade["buy_price"], trade["sell_price"],
                 trade["profit_pct"], trade["sell_reason"],
             )
-        except Exception as e:
-            notifier.notify_error(f"정규장종료 실전매도 실패: {e}")
-            notifier.notify_sim_sell(
-                trade["symbol"], trade["exchange"], trade["quantity"],
-                trade["buy_price"], trade["sell_price"],
-                trade["profit_pct"], trade["sell_reason"] + f" (실주문실패:{e})",
-            )
-    else:
-        notifier.notify_sim_sell(
-            trade["symbol"], trade["exchange"], trade["quantity"],
-            trade["buy_price"], trade["sell_price"],
-            trade["profit_pct"], trade["sell_reason"],
-        )
+
+    digest = us_sim.consume_skip_digest()
+    if digest:
+        notifier.notify_skip_digest(digest)
+
     _save_state()
 
 
@@ -268,6 +289,9 @@ def main() -> None:
         f"(${us_sim.SIM_AMOUNT_USD:g}) / "
         f"실전: {'ON 방식A 1종목' if LIVE_ORDERS else 'OFF'} "
         f"(${us_sim.LIVE_AMOUNT_USD:g})\n"
+        f"병렬시뮬: {'ON' if us_sim.PARALLEL_SIM else 'OFF'} "
+        f"(최대 {us_sim.MAX_SIM_POSITIONS}종) · "
+        f"스킵알림 {us_sim.SKIP_NOTIFY_INTERVAL_MIN}분\n"
         f"점검 주기: {POLL_MIN}분 · 스크린 {us_screener.SCREEN_INTERVAL_MIN}분\n"
         f"⚠️ 국내 kis-trading-bot과 별도 Railway 서비스"
     )

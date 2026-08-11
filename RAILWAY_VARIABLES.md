@@ -43,6 +43,9 @@
 | `US_SIM_AMOUNT_USD` | `750` | 시뮬 1회 가상 매수(USD, ≈100만원) |
 | `US_SIM_STOP_LOSS_PCT` | `2.0` | 손절 % |
 | `US_SIM_TAKE_PROFIT_PCT` | `5.0` | 익절 % (하드) |
+| `US_PARALLEL_SIM` | `true` | 주포지션 보유 중 다른 종목 병렬 시뮬 |
+| `US_MAX_SIM_POSITIONS` | `5` | 병렬 시뮬 최대 종목 수 |
+| `US_SKIP_NOTIFY_INTERVAL_MIN` | `30` | 워치 스킵 사유 텔레그램 요약 주기(분) |
 | `US_HEARTBEAT_HOUR_KST` | `22` | 일일 하트비트(KST) |
 | `API_SECRET` | (임의) | `/health` 보호용 |
 
