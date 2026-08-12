@@ -3,7 +3,8 @@
 
 스케줄 (KST / America/New_York):
   - 미국 정규장(ET 09:30~16:00) 중 N분마다 시뮬 체크
-  - 장 종료 시 미청산 시뮬 강제청산
+  - KST 01:00 중간 보고 (정규장 중)
+  - 장 종료 시 강제청산 + 마감 보고
   - 실전 주문: ENABLE_US_LIVE_ORDERS=true 일 때만 (기본 OFF)
 """
 from __future__ import annotations
@@ -31,6 +32,8 @@ KST = ZoneInfo("Asia/Seoul")
 STATE_FILE = Path(__file__).resolve().parent / "trading_state.json"
 POLL_MIN = int(os.getenv("US_POLL_INTERVAL_MIN", "5"))
 LIVE_ORDERS = os.getenv("ENABLE_US_LIVE_ORDERS", "false").lower() == "true"
+MID_REPORT_HOUR_KST = int(os.getenv("US_MID_REPORT_HOUR_KST", "1"))
+REPORT_WINDOW_MIN = int(os.getenv("US_REPORT_WINDOW_MIN", "5"))
 
 _last_ran: dict[str, str] = {}
 _was_in_session = False
@@ -201,6 +204,87 @@ def _check_sim() -> None:
         notifier.notify_error(f"US 시뮬 오류: {e}")
 
 
+def _format_open_position_lines() -> list[str]:
+    """보유 종목 현재가·미실현 손익."""
+    lines: list[str] = []
+    pos = us_sim.get_open()
+    if pos:
+        try:
+            px = kis_us_api.get_us_price(pos["symbol"], pos["exchange"])
+            price = float(px["last"])
+            buy = float(pos["buy_price"])
+            pct = (price - buy) / buy * 100 if buy > 0 else 0
+            mode = "실전" if pos.get("is_live") else "시뮬"
+            tag = pos.get("strategy") or ""
+            lines.append(
+                f"  [{mode}] {tag+' ' if tag else ''}{pos['symbol']} "
+                f"{pct:+.1f}% @ ${price:.2f}"
+            )
+        except Exception as e:
+            lines.append(f"  {pos['symbol']}: 시세 조회 실패 ({e})")
+    for sym, ppos in us_sim.get_paper_positions().items():
+        try:
+            px = kis_us_api.get_us_price(sym, ppos["exchange"])
+            price = float(px["last"])
+            buy = float(ppos["buy_price"])
+            pct = (price - buy) / buy * 100 if buy > 0 else 0
+            tag = ppos.get("strategy") or ""
+            lines.append(
+                f"  [병렬시뮬] {tag+' ' if tag else ''}{sym} "
+                f"{pct:+.1f}% @ ${price:.2f}"
+            )
+        except Exception as e:
+            lines.append(f"  {sym}: 시세 조회 실패 ({e})")
+    return lines
+
+
+def _append_watchlist_section(lines: list[str]) -> None:
+    stats = us_screener.get_last_stats()
+    mode = stats.get("mode", "?")
+    preview = us_screener.format_watchlist_preview(8)
+    tcount = stats.get("tradeable", us_screener.tradeable_count())
+    lines.append(
+        f"워치 ({mode}) {stats.get('count', '?')}/{us_screener.MAX_WATCH} · "
+        f"매매가능 {tcount}"
+    )
+    lines.append(preview)
+    if mode == "fallback":
+        lines.append("⚠️ 순위 풀 비어 중형 폴백 사용")
+
+
+def _run_mid_report() -> None:
+    """KST 지정 시각 — 정규장 중간 보고 (1회/세션)."""
+    if not market_hours.is_us_regular_session():
+        return
+    key = f"mid_{_trading_day()}"
+    if _last_ran.get("mid_report") == key:
+        return
+    _last_ran["mid_report"] = key
+    print(f"[US보고] 중간 보고 ({market_hours.now_kst().strftime('%H:%M')} KST)")
+
+    lines = us_sim.format_session_report(closing=False)
+    pos_lines = _format_open_position_lines()
+    if pos_lines:
+        lines.append("보유 현재가:")
+        lines.extend(pos_lines)
+        lines.append("")
+    _append_watchlist_section(lines)
+    notifier.send("\n".join(lines))
+
+
+def _run_closing_report() -> None:
+    """미국 정규장 마감 — 최종 손익 보고 (1회/세션)."""
+    key = f"close_{_trading_day()}"
+    if _last_ran.get("closing_report") == key:
+        return
+    _last_ran["closing_report"] = key
+    print(f"[US보고] 장마감 보고 (NY {_trading_day()})")
+
+    lines = us_sim.format_session_report(closing=True)
+    _append_watchlist_section(lines)
+    notifier.send("\n".join(lines))
+
+
 def _session_end_close() -> None:
     def _px(symbol: str, exchange: str) -> float:
         try:
@@ -255,6 +339,7 @@ def _session_end_close() -> None:
         notifier.notify_skip_digest(digest)
 
     _save_state()
+    _run_closing_report()
 
 
 def main() -> None:
@@ -293,6 +378,7 @@ def main() -> None:
         f"(최대 {us_sim.MAX_SIM_POSITIONS}종) · "
         f"스킵알림 {us_sim.SKIP_NOTIFY_INTERVAL_MIN}분\n"
         f"점검 주기: {POLL_MIN}분 · 스크린 {us_screener.SCREEN_INTERVAL_MIN}분\n"
+        f"보고: 중간 KST {MID_REPORT_HOUR_KST:02d}:00 · 마감 NY 종료\n"
         f"⚠️ 국내 kis-trading-bot과 별도 Railway 서비스"
     )
 
@@ -332,6 +418,13 @@ def main() -> None:
                 _run_screen(force=False, notify=True)
                 session_open_notified = True
                 _check_sim()
+
+            # 중간 보고 (KST 01:00 등, 정규장 중 1회)
+            if (
+                now.hour == MID_REPORT_HOUR_KST
+                and now.minute < REPORT_WINDOW_MIN
+            ):
+                _run_mid_report()
 
         # 하트비트 (KST 지정 시각, 1회/일)
         hb = int(os.getenv("US_HEARTBEAT_HOUR_KST", "22"))

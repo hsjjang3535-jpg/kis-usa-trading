@@ -66,6 +66,7 @@ _orb_ranges: dict[str, dict] = {}
 _vwap_cache: dict[str, float] = {}
 _last_skips: list[dict] = []
 _last_skip_notify_at: datetime | None = None
+_latest_skip_by_symbol: dict[str, str] = {}
 
 
 def _active_watchlist() -> list[tuple[str, str]]:
@@ -129,6 +130,7 @@ def load_state(data: dict | None) -> None:
 def reset_daily() -> None:
     global _open, _paper, _trades_today, _bought_symbols_today, _orb_ranges
     global _vwap_cache, _live_used_today, _last_skips, _last_skip_notify_at
+    global _latest_skip_by_symbol
     _open = None
     _paper = {}
     _trades_today = []
@@ -138,6 +140,7 @@ def reset_daily() -> None:
     _vwap_cache = {}
     _last_skips = []
     _last_skip_notify_at = None
+    _latest_skip_by_symbol = {}
 
 
 def live_slot_available() -> bool:
@@ -179,7 +182,37 @@ def _record_skip(symbol: str, reason: str) -> None:
         "reason": reason,
         "at": market_hours.now_ny().strftime("%H:%M"),
     })
+    _latest_skip_by_symbol[symbol] = reason
     print(f"[US스킵] {symbol}: {reason}")
+
+
+def _trade_pnl_usd(trade: dict) -> float:
+    qty = int(trade["quantity"])
+    return (float(trade["sell_price"]) - float(trade["buy_price"])) * qty
+
+
+def compute_pnl_summary() -> dict:
+    live_trades = [t for t in _trades_today if t.get("is_live")]
+    sim_trades = [t for t in _trades_today if not t.get("is_live")]
+
+    def _bucket(trades: list[dict]) -> dict:
+        pnl = sum(_trade_pnl_usd(t) for t in trades)
+        return {
+            "count": len(trades),
+            "pnl_usd": round(pnl, 2),
+            "wins": sum(1 for t in trades if _trade_pnl_usd(t) > 0),
+        }
+
+    return {"live": _bucket(live_trades), "sim": _bucket(sim_trades)}
+
+
+def get_latest_skip_lines(max_items: int = 8) -> list[str]:
+    items = sorted(_latest_skip_by_symbol.items())[:max_items]
+    lines = [f"  · {sym}: {why}" for sym, why in items]
+    extra = len(_latest_skip_by_symbol) - max_items
+    if extra > 0:
+        lines.append(f"  … 외 {extra}종")
+    return lines
 
 
 def should_notify_skips() -> bool:
@@ -736,6 +769,83 @@ def run_check() -> list[dict]:
         })
 
     return events
+
+
+def format_session_report(*, closing: bool = False) -> list[str]:
+    """중간/마감 보고 본문 (실시간 시세 제외)."""
+    ny_day = market_hours.trading_day_ny()
+    now_kst = market_hours.now_kst()
+    now_ny = market_hours.now_ny()
+    pnl = compute_pnl_summary()
+    lines: list[str] = []
+
+    if closing:
+        lines.append(f"📋 <b>US 장마감 보고</b> ({ny_day} NY)")
+    else:
+        lines.append(f"📊 <b>US 중간 보고</b> (KST {now_kst.strftime('%H:%M')})")
+    lines.append(
+        f"NY {now_ny.strftime('%H:%M')} · 세션 {market_hours.session_label()}"
+    )
+    lines.append("")
+
+    live = pnl["live"]
+    sim = pnl["sim"]
+    lines.append(
+        f"💰 <b>실전 손익: ${live['pnl_usd']:+,.2f}</b> "
+        f"({live['count']}건 · 승 {live['wins']})"
+    )
+    lines.append(
+        f"🧪 <b>시뮬 손익: ${sim['pnl_usd']:+,.2f}</b> "
+        f"({sim['count']}건 · 승 {sim['wins']})"
+    )
+    lines.append("")
+
+    if _trades_today:
+        lines.append(f"체결 {len(_trades_today)}건:")
+        for t in _trades_today:
+            s = "+" if t["profit_pct"] >= 0 else ""
+            tag = t.get("strategy") or ""
+            mode = "실전" if t.get("is_live") else "시뮬"
+            pnl_usd = _trade_pnl_usd(t)
+            lines.append(
+                f"  [{mode}] {tag+' ' if tag else ''}{t['symbol']} "
+                f"${t['buy_price']:.2f}→${t['sell_price']:.2f} "
+                f"{s}{t['profit_pct']}% (${pnl_usd:+,.2f})"
+            )
+        lines.append("")
+    elif closing:
+        lines.append("매매 없음 (진입 조건 미충족)\n")
+
+    open_n = (1 if _open else 0) + len(_paper)
+    if open_n and closing:
+        lines.append(f"마감 시점 미청산 {open_n}건")
+        if _open:
+            mode = "실전" if _open.get("is_live") else "시뮬"
+            tag = _open.get("strategy") or ""
+            lines.append(
+                f"  [{mode}] {tag+' ' if tag else ''}{_open['symbol']} "
+                f"${_open['buy_price']:.2f} × {_open['quantity']}"
+            )
+        for sym, pos in _paper.items():
+            tag = pos.get("strategy") or ""
+            lines.append(
+                f"  [병렬시뮬] {tag+' ' if tag else ''}{sym} "
+                f"${pos['buy_price']:.2f} × {pos['quantity']}"
+            )
+        lines.append("")
+
+    if LIVE_ORDERS:
+        slot = "소진" if _live_used_today else "가능"
+        lines.append(f"실전슬롯: {slot} · 총한도 ${MAX_TOTAL_USD:g}")
+        lines.append("")
+
+    skip_lines = get_latest_skip_lines()
+    if skip_lines and (closing or not _trades_today):
+        lines.append("미진입 사유 (최근):")
+        lines.extend(skip_lines)
+        lines.append("")
+
+    return lines
 
 
 def format_summary() -> list[str]:

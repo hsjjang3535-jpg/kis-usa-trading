@@ -47,6 +47,8 @@
 | `US_PARALLEL_SIM` | `true` | 주포지션 보유 중 다른 종목 병렬 시뮬 |
 | `US_MAX_SIM_POSITIONS` | `5` | 병렬 시뮬 최대 종목 수 |
 | `US_SKIP_NOTIFY_INTERVAL_MIN` | `30` | 워치 스킵 사유 텔레그램 요약 주기(분) |
+| `US_MID_REPORT_HOUR_KST` | `1` | 정규장 중간 보고 시각(KST, 1회/세션) |
+| `US_REPORT_WINDOW_MIN` | `5` | 중간 보고 허용 분(0~N-1분) |
 | `US_HEARTBEAT_HOUR_KST` | `22` | 일일 하트비트(KST) |
 | `API_SECRET` | (임의) | `/health` 보호용 |
 
