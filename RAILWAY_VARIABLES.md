@@ -12,7 +12,7 @@
 | `KIS_ACCOUNT_NO` | `12345678-01` | 통합증거금 계좌 |
 | `TELEGRAM_BOT_TOKEN` | | 봇 토큰 |
 | `TELEGRAM_CHAT_ID` | | 채팅 ID |
-| `PORT` | `8080` | Railway 헬스체크 |
+| `PORT` | `8080` | Railway 헬스체크 (`/healthz`) |
 
 ## 권장
 
@@ -49,6 +49,7 @@
 | `US_SKIP_NOTIFY_INTERVAL_MIN` | `30` | 워치 스킵 사유 텔레그램 요약 주기(분) |
 | `US_MID_REPORT_HOUR_KST` | `1` | 정규장 중간 보고 시각(KST, 1회/세션) |
 | `US_REPORT_WINDOW_MIN` | `5` | 중간 보고 허용 분(0~N-1분) |
+| `US_LOOP_STALE_SEC` | `300` | 정규장 중 루프 5분 무응답 시 헬스 503 → Railway 재시작 |
 | `US_HEARTBEAT_HOUR_KST` | `22` | 일일 하트비트(KST) |
 | `API_SECRET` | (임의) | `/health` 보호용 |
 

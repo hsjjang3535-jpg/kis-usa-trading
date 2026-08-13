@@ -4,4 +4,6 @@ builder = "NIXPACKS"
 [deploy]
 startCommand = "python trader.py"
 restartPolicyType = "ON_FAILURE"
-restartPolicyMaxRetries = 3
+restartPolicyMaxRetries = 10
+healthcheckPath = "/healthz"
+healthcheckTimeout = 120

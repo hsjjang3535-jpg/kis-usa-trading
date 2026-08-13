@@ -38,6 +38,86 @@ REPORT_WINDOW_MIN = int(os.getenv("US_REPORT_WINDOW_MIN", "5"))
 _last_ran: dict[str, str] = {}
 _was_in_session = False
 _last_screen_key = ""
+_loop_errors = 0
+_last_error_notify_at: datetime | None = None
+
+
+def _notify_loop_error(exc: Exception) -> None:
+    """루프 오류 알림 — 스팸 방지 (30분에 1회)."""
+    global _loop_errors, _last_error_notify_at
+    _loop_errors += 1
+    print(f"[메인루프 오류 #{_loop_errors}] {exc}")
+    now = datetime.now(KST)
+    if _last_error_notify_at is None or (now - _last_error_notify_at).total_seconds() >= 1800:
+        _last_error_notify_at = now
+        notifier.notify_error(
+            f"US봇 메인루프 오류 (#{_loop_errors}) — 자동 재시도 중\n{exc}"
+        )
+
+
+def _run_loop_tick(
+    *,
+    last_poll_min: int,
+    session_open_notified: bool,
+) -> tuple[int, bool]:
+    """메인 루프 1회. (last_poll_min, session_open_notified) 반환."""
+    api_server.touch_loop()
+    _reset_if_new_day()
+    in_session = market_hours.is_us_regular_session()
+    now = market_hours.now_kst()
+    tmin = now.hour * 60 + now.minute
+
+    global _was_in_session
+    if _was_in_session and not in_session:
+        print("[세션] 정규장 종료 → 시뮬 청산 점검")
+        _session_end_close()
+        session_open_notified = False
+    if in_session and not _was_in_session:
+        notifier.send(
+            f"🇺🇸 <b>정규장 시작</b> — 시뮬 점검 가동\n"
+            f"NY {market_hours.now_ny().strftime('%H:%M')} / "
+            f"KST {now.strftime('%H:%M')}"
+        )
+        _run_screen(force=True, notify=True)
+        session_open_notified = True
+        last_poll_min = tmin
+        _check_sim()
+    _was_in_session = in_session
+
+    if not in_session:
+        _maybe_closing_report_backup()
+
+    if in_session:
+        if last_poll_min < 0 or tmin - last_poll_min >= POLL_MIN or tmin < last_poll_min:
+            last_poll_min = tmin
+            _run_screen(force=False, notify=True)
+            session_open_notified = True
+            _check_sim()
+
+        if now.hour == MID_REPORT_HOUR_KST and now.minute < REPORT_WINDOW_MIN:
+            _run_mid_report()
+
+    hb = int(os.getenv("US_HEARTBEAT_HOUR_KST", "22"))
+    if now.hour == hb and now.minute < 5 and _last_ran.get("heartbeat") != _today_kst():
+        _last_ran["heartbeat"] = _today_kst()
+        lines = [
+            f"🇺🇸 US봇 하트비트 ({now.strftime('%H:%M')} KST)",
+            f"세션: {market_hours.session_label()}",
+            f"워치: {us_screener.format_watchlist_preview(8)}",
+        ]
+        lines.extend(us_sim.format_summary() or ["시뮬 포지션/체결 없음"])
+        notifier.send("\n".join(lines))
+
+    return last_poll_min, session_open_notified
+
+
+def _report_sent(kind: str, ny_day: str | None = None) -> bool:
+    day = ny_day or _trading_day()
+    return _last_ran.get(f"{kind}_report") == day
+
+
+def _mark_report_sent(kind: str, ny_day: str | None = None) -> None:
+    _last_ran[f"{kind}_report"] = ny_day or _trading_day()
 
 
 def _today_kst() -> str:
@@ -53,6 +133,10 @@ def _save_state() -> None:
     state = {
         "date": _trading_day(),
         "us_sim": us_sim.dump_state(),
+        "reports": {
+            "mid_report": _last_ran.get("mid_report", ""),
+            "closing_report": _last_ran.get("closing_report", ""),
+        },
     }
     try:
         STATE_FILE.write_text(
@@ -69,6 +153,11 @@ def _load_state() -> None:
     try:
         state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
         us_sim.load_state(state.get("us_sim"))
+        reports = state.get("reports") if isinstance(state.get("reports"), dict) else {}
+        if reports.get("mid_report"):
+            _last_ran["mid_report"] = str(reports["mid_report"])
+        if reports.get("closing_report"):
+            _last_ran["closing_report"] = str(reports["closing_report"])
         if us_sim.get_open():
             pos = us_sim.get_open()
             print(f"[상태 복원] US 시뮬 보유 {pos['symbol']}")
@@ -256,10 +345,10 @@ def _run_mid_report() -> None:
     """KST 지정 시각 — 정규장 중간 보고 (1회/세션)."""
     if not market_hours.is_us_regular_session():
         return
-    key = f"mid_{_trading_day()}"
-    if _last_ran.get("mid_report") == key:
+    ny_day = _trading_day()
+    if _report_sent("mid", ny_day):
         return
-    _last_ran["mid_report"] = key
+    _mark_report_sent("mid", ny_day)
     print(f"[US보고] 중간 보고 ({market_hours.now_kst().strftime('%H:%M')} KST)")
 
     lines = us_sim.format_session_report(closing=False)
@@ -270,19 +359,43 @@ def _run_mid_report() -> None:
         lines.append("")
     _append_watchlist_section(lines)
     notifier.send("\n".join(lines))
+    _save_state()
 
 
 def _run_closing_report() -> None:
     """미국 정규장 마감 — 최종 손익 보고 (1회/세션)."""
-    key = f"close_{_trading_day()}"
-    if _last_ran.get("closing_report") == key:
+    ny_day = _trading_day()
+    if _report_sent("closing", ny_day):
         return
-    _last_ran["closing_report"] = key
-    print(f"[US보고] 장마감 보고 (NY {_trading_day()})")
+    _mark_report_sent("closing", ny_day)
+    print(f"[US보고] 장마감 보고 (NY {ny_day})")
 
     lines = us_sim.format_session_report(closing=True)
     _append_watchlist_section(lines)
     notifier.send("\n".join(lines))
+    _save_state()
+
+
+def _in_closing_report_window() -> bool:
+    """NY 정규장 마감(16:00) 직후 ~ 당일 밤 — 백업 보고 허용 구간."""
+    ny = market_hours.now_ny()
+    if ny.weekday() >= 5:
+        return False
+    if market_hours.is_us_regular_session():
+        return False
+    tmin = ny.hour * 60 + ny.minute
+    close_min = 16 * 60
+    return close_min + 5 <= tmin <= 23 * 60 + 59
+
+
+def _maybe_closing_report_backup() -> None:
+    """세션 종료 edge를 놓친 경우(재시작·다운) 마감 보고 복구."""
+    if _report_sent("closing"):
+        return
+    if not _in_closing_report_window():
+        return
+    print("[US보고] 마감 보고 백업 트리거 (세션 종료 감지 누락 복구)")
+    _session_end_close()
 
 
 def _session_end_close() -> None:
@@ -293,58 +406,63 @@ def _session_end_close() -> None:
         except Exception:
             return 0.0
 
-    pos = us_sim.get_open()
-    if pos:
-        price = _px(pos["symbol"], pos["exchange"]) or float(pos["buy_price"])
-        was_live = bool(pos.get("is_live"))
-        trade = us_sim.force_close(price, "정규장 종료 청산")
-        if trade:
-            if was_live:
-                try:
-                    order_px = _limit_sell_price(float(trade["sell_price"]))
-                    kis_us_api.sell_us_stock(
-                        trade["symbol"], trade["quantity"], order_px, trade["exchange"],
-                    )
-                    notifier.notify_live_sell(
+    try:
+        pos = us_sim.get_open()
+        if pos:
+            price = _px(pos["symbol"], pos["exchange"]) or float(pos["buy_price"])
+            was_live = bool(pos.get("is_live"))
+            trade = us_sim.force_close(price, "정규장 종료 청산")
+            if trade:
+                if was_live:
+                    try:
+                        order_px = _limit_sell_price(float(trade["sell_price"]))
+                        kis_us_api.sell_us_stock(
+                            trade["symbol"], trade["quantity"], order_px, trade["exchange"],
+                        )
+                        notifier.notify_live_sell(
+                            trade["symbol"], trade["exchange"], trade["quantity"],
+                            trade["buy_price"], trade["sell_price"],
+                            trade["profit_pct"], trade["sell_reason"],
+                        )
+                    except Exception as e:
+                        notifier.notify_error(f"정규장종료 실전매도 실패: {e}")
+                        notifier.notify_sim_sell(
+                            trade["symbol"], trade["exchange"], trade["quantity"],
+                            trade["buy_price"], trade["sell_price"],
+                            trade["profit_pct"], trade["sell_reason"] + f" (실주문실패:{e})",
+                        )
+                else:
+                    notifier.notify_sim_sell(
                         trade["symbol"], trade["exchange"], trade["quantity"],
                         trade["buy_price"], trade["sell_price"],
                         trade["profit_pct"], trade["sell_reason"],
                     )
-                except Exception as e:
-                    notifier.notify_error(f"정규장종료 실전매도 실패: {e}")
-                    notifier.notify_sim_sell(
-                        trade["symbol"], trade["exchange"], trade["quantity"],
-                        trade["buy_price"], trade["sell_price"],
-                        trade["profit_pct"], trade["sell_reason"] + f" (실주문실패:{e})",
-                    )
-            else:
+
+        for sym, ppos in list(us_sim.get_paper_positions().items()):
+            price = _px(sym, ppos["exchange"]) or float(ppos["buy_price"])
+            trade = us_sim.force_close_paper(sym, price, "정규장 종료 청산")
+            if trade:
                 notifier.notify_sim_sell(
                     trade["symbol"], trade["exchange"], trade["quantity"],
                     trade["buy_price"], trade["sell_price"],
                     trade["profit_pct"], trade["sell_reason"],
                 )
 
-    for sym, ppos in list(us_sim.get_paper_positions().items()):
-        price = _px(sym, ppos["exchange"]) or float(ppos["buy_price"])
-        trade = us_sim.force_close_paper(sym, price, "정규장 종료 청산")
-        if trade:
-            notifier.notify_sim_sell(
-                trade["symbol"], trade["exchange"], trade["quantity"],
-                trade["buy_price"], trade["sell_price"],
-                trade["profit_pct"], trade["sell_reason"],
-            )
-
-    digest = us_sim.consume_skip_digest()
-    if digest:
-        notifier.notify_skip_digest(digest)
-
-    _save_state()
-    _run_closing_report()
+        digest = us_sim.consume_skip_digest()
+        if digest:
+            notifier.notify_skip_digest(digest)
+    except Exception as e:
+        print(f"[US세션종료] 청산 오류: {e}")
+        notifier.notify_error(f"US 정규장 종료 청산 오류: {e}")
+    finally:
+        _save_state()
+        _run_closing_report()
 
 
 def main() -> None:
     print("=== KIS 미국주식 봇 시작 (국내 봇과 분리) ===")
     _load_state()
+    _maybe_closing_report_backup()
 
     api_thread = threading.Thread(target=api_server.start_api_server, daemon=True)
     api_thread.start()
@@ -388,58 +506,33 @@ def main() -> None:
     session_open_notified = False
 
     while True:
-        _reset_if_new_day()
-        in_session = market_hours.is_us_regular_session()
-        now = market_hours.now_kst()
-        tmin = now.hour * 60 + now.minute
-
-        # 정규장 종료 감지 → 강제청산
-        if _was_in_session and not in_session:
-            print("[세션] 정규장 종료 → 시뮬 청산 점검")
-            _session_end_close()
-            session_open_notified = False
-        # 정규장 개시 → 강제 스크린 + 알림
-        if in_session and not _was_in_session:
-            notifier.send(
-                f"🇺🇸 <b>정규장 시작</b> — 시뮬 점검 가동\n"
-                f"NY {market_hours.now_ny().strftime('%H:%M')} / "
-                f"KST {now.strftime('%H:%M')}"
+        try:
+            last_poll_min, session_open_notified = _run_loop_tick(
+                last_poll_min=last_poll_min,
+                session_open_notified=session_open_notified,
             )
-            _run_screen(force=True, notify=True)
-            session_open_notified = True
-            last_poll_min = tmin
-            _check_sim()
-        _was_in_session = in_session
-
-        if in_session:
-            if last_poll_min < 0 or tmin - last_poll_min >= POLL_MIN or tmin < last_poll_min:
-                last_poll_min = tmin
-                # 주기 스크린 — 후보 바뀌면만 텔레그램
-                _run_screen(force=False, notify=True)
-                session_open_notified = True
-                _check_sim()
-
-            # 중간 보고 (KST 01:00 등, 정규장 중 1회)
-            if (
-                now.hour == MID_REPORT_HOUR_KST
-                and now.minute < REPORT_WINDOW_MIN
-            ):
-                _run_mid_report()
-
-        # 하트비트 (KST 지정 시각, 1회/일)
-        hb = int(os.getenv("US_HEARTBEAT_HOUR_KST", "22"))
-        if now.hour == hb and now.minute < 5 and _last_ran.get("heartbeat") != _today_kst():
-            _last_ran["heartbeat"] = _today_kst()
-            lines = [
-                f"🇺🇸 US봇 하트비트 ({now.strftime('%H:%M')} KST)",
-                f"세션: {market_hours.session_label()}",
-                f"워치: {us_screener.format_watchlist_preview(8)}",
-            ]
-            lines.extend(us_sim.format_summary() or ["시뮬 포지션/체결 없음"])
-            notifier.send("\n".join(lines))
-
+        except Exception as e:
+            _notify_loop_error(e)
+            time.sleep(min(30 + _loop_errors * 10, 120))
+            continue
         time.sleep(20)
 
 
+def _run_forever() -> None:
+    """프로세스 전체 감시 — main()이 죽어도 재기동."""
+    restarts = 0
+    while True:
+        try:
+            main()
+        except KeyboardInterrupt:
+            print("[종료] KeyboardInterrupt")
+            break
+        except Exception as e:
+            restarts += 1
+            print(f"[치명적 오류 · 재시작 #{restarts}] {e}")
+            notifier.notify_error(f"⚠️ US봇 프로세스 재시작 (#{restarts})\n{e}")
+            time.sleep(min(60 * restarts, 300))
+
+
 if __name__ == "__main__":
-    main()
+    _run_forever()
