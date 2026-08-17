@@ -8,8 +8,8 @@
 
 청산: -2% 손절 / +5% 익절 (하드) / 정규장 종료 강제청산
 
-방식 A: 같은 점검에서 조건 통과 종목 중 신호점수 최고 1종만
-세션 실주문(실전 슬롯 1회). 나머지는 병렬 시뮬 (US_PARALLEL_SIM).
+방식 A: 같은 점검에서 조건 통과 종목 중 신호점수 순으로
+세션 실주문(US_LIVE_MAX_POSITIONS, 기본 2종). 나머지는 병렬 시뮬 (US_PARALLEL_SIM).
 """
 from __future__ import annotations
 
@@ -30,6 +30,8 @@ SIM_AMOUNT_USD = float(os.getenv("US_SIM_AMOUNT_USD", "750"))
 LIVE_AMOUNT_USD = float(os.getenv("US_LIVE_AMOUNT_USD", os.getenv("US_SIM_AMOUNT_USD", "750")))
 # 실전 총 투자 한도 ≈200만원
 MAX_TOTAL_USD = float(os.getenv("US_MAX_TOTAL_USD", "1500"))
+# 세션당 실전 최대 종목 수 (1종≈750USD × 2 = 총한도 1500)
+LIVE_MAX_POSITIONS = int(os.getenv("US_LIVE_MAX_POSITIONS", "2"))
 STOP_LOSS_PCT = float(os.getenv("US_SIM_STOP_LOSS_PCT", "2.0"))
 TAKE_PROFIT_PCT = float(os.getenv("US_SIM_TAKE_PROFIT_PCT", "5.0"))
 MIN_DAY_PCT = float(os.getenv("US_SIM_MIN_DAY_PCT", "3.0"))
@@ -61,7 +63,7 @@ _open: dict | None = None  # 주포지션 (실전 가능)
 _paper: dict[str, dict] = {}  # 병렬 시뮬 symbol -> pos
 _trades_today: list[dict] = []
 _bought_symbols_today: set[str] = set()
-_live_used_today = False
+_live_entries_today = 0
 _orb_ranges: dict[str, dict] = {}
 _vwap_cache: dict[str, float] = {}
 _last_skips: list[dict] = []
@@ -99,43 +101,53 @@ def dump_state() -> dict:
         "paper": {k: dict(v) for k, v in _paper.items()},
         "trades_today": list(_trades_today),
         "bought_symbols_today": sorted(_bought_symbols_today),
-        "live_used_today": _live_used_today,
+        "live_entries_today": _live_entries_today,
         "orb_ranges": dict(_orb_ranges),
         "date": market_hours.trading_day_ny(),
     }
 
 
 def load_state(data: dict | None) -> None:
-    global _open, _paper, _trades_today, _bought_symbols_today, _orb_ranges, _live_used_today
+    global _open, _paper, _trades_today, _bought_symbols_today, _orb_ranges, _live_entries_today
     if not isinstance(data, dict):
         return
+    saved_day = data.get("date")
     today = market_hours.trading_day_ny()
+    last_done = market_hours.last_completed_session_day()
+    keep = saved_day in (today, last_done)
     _open = data.get("open") if isinstance(data.get("open"), dict) else None
     raw_paper = data.get("paper") if isinstance(data.get("paper"), dict) else {}
     _paper = {k: dict(v) for k, v in raw_paper.items() if isinstance(v, dict)}
-    if data.get("date") == today:
+    if keep:
         _trades_today = list(data.get("trades_today") or [])
         _bought_symbols_today = set(data.get("bought_symbols_today") or [])
-        _live_used_today = bool(data.get("live_used_today"))
+        raw_live = data.get("live_entries_today")
+        if raw_live is not None:
+            _live_entries_today = int(raw_live)
+        elif data.get("live_used_today"):
+            _live_entries_today = 1
+        else:
+            _live_entries_today = 0
         raw_orb = data.get("orb_ranges") or {}
         _orb_ranges = dict(raw_orb) if isinstance(raw_orb, dict) else {}
     else:
         _trades_today = []
         _bought_symbols_today = set()
-        _live_used_today = False
+        _live_entries_today = 0
         _orb_ranges = {}
         _paper = {}
+        _open = None
 
 
 def reset_daily() -> None:
     global _open, _paper, _trades_today, _bought_symbols_today, _orb_ranges
-    global _vwap_cache, _live_used_today, _last_skips, _last_skip_notify_at
+    global _vwap_cache, _live_entries_today, _last_skips, _last_skip_notify_at
     global _latest_skip_by_symbol
     _open = None
     _paper = {}
     _trades_today = []
     _bought_symbols_today = set()
-    _live_used_today = False
+    _live_entries_today = 0
     _orb_ranges = {}
     _vwap_cache = {}
     _last_skips = []
@@ -143,11 +155,51 @@ def reset_daily() -> None:
     _latest_skip_by_symbol = {}
 
 
+def live_slots_remaining() -> int:
+    """세션 남은 실전 진입 슬롯."""
+    if not LIVE_ORDERS:
+        return 0
+    return max(0, LIVE_MAX_POSITIONS - _live_entries_today)
+
+
 def live_slot_available() -> bool:
-    """방식 A: 아직 세션 실전 슬롯 남음 + 총한도 여유."""
-    if not (LIVE_ORDERS and not _live_used_today):
+    """실전 슬롯 남음 + 총한도 여유."""
+    if live_slots_remaining() <= 0:
         return False
     return _live_budget_remaining() > 0
+
+
+def _want_live_for_price(price: float) -> bool:
+    if not live_slot_available():
+        return False
+    return _live_budget_remaining() >= price
+
+
+def mark_live_used() -> None:
+    global _live_entries_today
+    _live_entries_today += 1
+
+
+def downgrade_live_to_sim(symbol: str) -> None:
+    """실주문 실패 시 해당 포지션만 시뮬로 전환."""
+    global _open
+    if _open and _open.get("symbol") == symbol:
+        _open["is_live"] = False
+        return
+    pos = _paper.get(symbol)
+    if pos:
+        pos["is_live"] = False
+
+
+def _live_exposed() -> float:
+    """현재 실전 포지션 평가액(USD) — 주포지션 + 병렬 실전."""
+    total = 0.0
+    if _open and _open.get("is_live"):
+        total += float(_open["buy_price"]) * int(_open["quantity"])
+    for pos in _paper.values():
+        if pos.get("is_live"):
+            total += float(pos["buy_price"]) * int(pos["quantity"])
+    return total
 
 
 def _signal_score(strategy: str, *, gap: float = 0.0, day_pct: float = 0.0, rvol: float = 0.0) -> float:
@@ -158,18 +210,6 @@ def _signal_score(strategy: str, *, gap: float = 0.0, day_pct: float = 0.0, rvol
     if strategy == "ORB":
         return base + day_pct * 10.0 + rvol * 20.0
     return base + day_pct * 5.0 + rvol * 10.0
-
-
-def mark_live_used() -> None:
-    global _live_used_today
-    _live_used_today = True
-
-
-def _live_exposed() -> float:
-    """현재 실전 포지션 평가액(USD)."""
-    if _open and _open.get("is_live"):
-        return float(_open["buy_price"]) * int(_open["quantity"])
-    return 0.0
 
 
 def _live_budget_remaining() -> float:
@@ -584,7 +624,7 @@ def _open_position(
     live: bool,
     paper: bool,
 ) -> dict:
-    qty = _qty(price, live=live and not paper)
+    qty = _qty(price, live=live)
     pos = {
         "symbol": symbol,
         "exchange": exchange,
@@ -593,7 +633,7 @@ def _open_position(
         "peak_price": price,
         "buy_reason": reason,
         "strategy": strategy,
-        "is_live": live and not paper,
+        "is_live": live,
         "paper": paper,
     }
     _bought_symbols_today.add(symbol)
@@ -707,9 +747,7 @@ def run_check() -> list[dict]:
 
         # 점수 최고(남은 후보 중) → 주포지션. 실전 슬롯 있으면 실주문.
         if primary_free:
-            want_live = live_slot_available()
-            if want_live and _live_budget_remaining() < price:
-                want_live = False
+            want_live = _want_live_for_price(price)
             pos = _open_position(
                 symbol=symbol, exchange=exchange, price=price,
                 reason=reason, strategy=strategy, live=want_live, paper=False,
@@ -734,26 +772,29 @@ def run_check() -> list[dict]:
             })
             continue
 
-        # 주포지션 이미 있음 → 병렬 시뮬
-        if not PARALLEL_SIM:
+        # 주포지션 이미 있음 → 병렬 (실전 슬롯 있으면 실전, 아니면 시뮬)
+        want_live = _want_live_for_price(price)
+        if not PARALLEL_SIM and not want_live:
             _record_skip(
                 symbol,
                 f"신호OK·점수{score:.0f}·주포지션보유({_open and _open.get('symbol')})",
             )
             continue
-        if paper_slots <= 0:
+        if not want_live and paper_slots <= 0:
             _record_skip(symbol, f"신호OK·점수{score:.0f}·시뮬한도초과")
             continue
+        reason_suffix = " (병렬실전)" if want_live else " (병렬시뮬)"
         pos = _open_position(
             symbol=symbol, exchange=exchange, price=price,
-            reason=reason + " (병렬시뮬)", strategy=strategy,
-            live=False, paper=True,
+            reason=reason + reason_suffix, strategy=strategy,
+            live=want_live, paper=True,
         )
         if pos["quantity"] < 1:
             _record_skip(symbol, "수량0")
             continue
         _paper[symbol] = pos
-        paper_slots -= 1
+        if not want_live:
+            paper_slots -= 1
         held.add(symbol)
         events.append({
             "action": "buy",
@@ -764,17 +805,16 @@ def run_check() -> list[dict]:
             "reason": pos["buy_reason"],
             "strategy": strategy,
             "score": score,
-            "is_live": False,
+            "is_live": want_live,
             "paper": True,
         })
 
     return events
 
 
-def format_session_report(*, closing: bool = False) -> list[str]:
+def format_session_report(*, closing: bool = False, ny_day: str | None = None) -> list[str]:
     """중간/마감 보고 본문 (실시간 시세 제외)."""
-    ny_day = market_hours.trading_day_ny()
-    now_kst = market_hours.now_kst()
+    ny_day = ny_day or market_hours.trading_day_ny()
     now_ny = market_hours.now_ny()
     pnl = compute_pnl_summary()
     lines: list[str] = []
@@ -782,7 +822,7 @@ def format_session_report(*, closing: bool = False) -> list[str]:
     if closing:
         lines.append(f"📋 <b>US 장마감 보고</b> ({ny_day} NY)")
     else:
-        lines.append(f"📊 <b>US 중간 보고</b> (KST {now_kst.strftime('%H:%M')})")
+        lines.append(f"📊 <b>US 중간 보고</b> (NY {now_ny.strftime('%H:%M')})")
     lines.append(
         f"NY {now_ny.strftime('%H:%M')} · 세션 {market_hours.session_label()}"
     )
@@ -828,14 +868,16 @@ def format_session_report(*, closing: bool = False) -> list[str]:
             )
         for sym, pos in _paper.items():
             tag = pos.get("strategy") or ""
+            mode = "실전" if pos.get("is_live") else "병렬시뮬"
             lines.append(
-                f"  [병렬시뮬] {tag+' ' if tag else ''}{sym} "
+                f"  [{mode}] {tag+' ' if tag else ''}{sym} "
                 f"${pos['buy_price']:.2f} × {pos['quantity']}"
             )
         lines.append("")
 
     if LIVE_ORDERS:
-        slot = "소진" if _live_used_today else "가능"
+        rem = live_slots_remaining()
+        slot = f"{_live_entries_today}/{LIVE_MAX_POSITIONS} ({'가능' if rem else '소진'})"
         lines.append(f"실전슬롯: {slot} · 총한도 ${MAX_TOTAL_USD:g}")
         lines.append("")
 
@@ -861,8 +903,8 @@ def format_summary() -> list[str]:
         rules.append("VWAP↑")
     rules.append(f"익절+{TAKE_PROFIT_PCT:g}%/손절-{STOP_LOSS_PCT:g}%")
     if LIVE_ORDERS:
-        slot = "실전슬롯소진" if _live_used_today else "실전1회가능"
-        rules.append(slot)
+        rem = live_slots_remaining()
+        rules.append(f"실전{rem}/{LIVE_MAX_POSITIONS}슬롯")
         rules.append(f"실전총한도${MAX_TOTAL_USD:g}")
     if PARALLEL_SIM:
         rules.append(f"병렬시뮬≤{MAX_SIM_POSITIONS}")
@@ -887,8 +929,9 @@ def format_summary() -> list[str]:
         )
     for sym, pos in _paper.items():
         tag = pos.get("strategy") or ""
+        mode = "실전" if pos.get("is_live") else "병렬시뮬"
         lines.append(
-            f"🇺🇸 US 병렬시뮬 [{tag}] {sym} "
+            f"🇺🇸 US {mode} [{tag}] {sym} "
             f"${pos['buy_price']:.2f} × {pos['quantity']}"
         )
     return lines

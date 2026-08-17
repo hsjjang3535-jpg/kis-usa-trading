@@ -12,18 +12,24 @@ BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 
-def send(message: str) -> None:
+def send(message: str) -> bool:
     if not BOT_TOKEN or not CHAT_ID:
         print(f"[텔레그램 미설정] {message}")
-        return
+        return False
     try:
-        requests.post(
+        res = requests.post(
             f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
             json={"chat_id": CHAT_ID, "text": message, "parse_mode": "HTML"},
             timeout=10,
         )
+        data = res.json() if res.content else {}
+        if not data.get("ok"):
+            print(f"[텔레그램 거부] {data}")
+            return False
+        return True
     except Exception as e:
         print(f"[텔레그램 전송 오류] {e}")
+        return False
 
 
 def notify_error(msg: str) -> None:

@@ -3,8 +3,8 @@
 
 스케줄 (KST / America/New_York):
   - 미국 정규장(ET 09:30~16:00) 중 N분마다 시뮬 체크
-  - KST 01:00 중간 보고 (정규장 중)
-  - 장 종료 시 강제청산 + 마감 보고
+  - NY 12:00 이후 중간 보고 (세션 중 1회, 창이 아니라 이후 재시도)
+  - 장 종료 시 강제청산 + 마감 보고 (주말 넘어서도 미발송이면 재시도)
   - 실전 주문: ENABLE_US_LIVE_ORDERS=true 일 때만 (기본 OFF)
 """
 from __future__ import annotations
@@ -32,14 +32,15 @@ KST = ZoneInfo("Asia/Seoul")
 STATE_FILE = Path(__file__).resolve().parent / "trading_state.json"
 POLL_MIN = int(os.getenv("US_POLL_INTERVAL_MIN", "5"))
 LIVE_ORDERS = os.getenv("ENABLE_US_LIVE_ORDERS", "false").lower() == "true"
-MID_REPORT_HOUR_KST = int(os.getenv("US_MID_REPORT_HOUR_KST", "1"))
-REPORT_WINDOW_MIN = int(os.getenv("US_REPORT_WINDOW_MIN", "5"))
+MID_REPORT_HOUR_NY = int(os.getenv("US_MID_REPORT_HOUR_NY", "12"))
 
 _last_ran: dict[str, str] = {}
 _was_in_session = False
 _last_screen_key = ""
 _loop_errors = 0
 _last_error_notify_at: datetime | None = None
+_last_report_try: dict[str, datetime] = {}
+REPORT_RETRY_SEC = 600
 
 
 def _notify_loop_error(exc: Exception) -> None:
@@ -88,21 +89,21 @@ def _run_loop_tick(
         _maybe_closing_report_backup()
 
     if in_session:
+        _maybe_mid_report()
         if last_poll_min < 0 or tmin - last_poll_min >= POLL_MIN or tmin < last_poll_min:
             last_poll_min = tmin
             _run_screen(force=False, notify=True)
             session_open_notified = True
             _check_sim()
 
-        if now.hour == MID_REPORT_HOUR_KST and now.minute < REPORT_WINDOW_MIN:
-            _run_mid_report()
-
     hb = int(os.getenv("US_HEARTBEAT_HOUR_KST", "22"))
     if now.hour == hb and now.minute < 5 and _last_ran.get("heartbeat") != _today_kst():
         _last_ran["heartbeat"] = _today_kst()
+        ny = market_hours.now_ny()
         lines = [
             f"🇺🇸 US봇 하트비트 ({now.strftime('%H:%M')} KST)",
-            f"세션: {market_hours.session_label()}",
+            f"세션: {market_hours.session_label(ny)}",
+            f"NY {ny.strftime('%Y-%m-%d %H:%M')} ({market_hours.ny_weekday_label(ny)})",
             f"워치: {us_screener.format_watchlist_preview(8)}",
         ]
         lines.extend(us_sim.format_summary() or ["시뮬 포지션/체결 없음"])
@@ -118,6 +119,16 @@ def _report_sent(kind: str, ny_day: str | None = None) -> bool:
 
 def _mark_report_sent(kind: str, ny_day: str | None = None) -> None:
     _last_ran[f"{kind}_report"] = ny_day or _trading_day()
+
+
+def _report_retry_ok(kind: str) -> bool:
+    """전송 실패 시 10분에 1회만 재시도 (텔레그램·KIS 남용 방지)."""
+    last = _last_report_try.get(kind)
+    now = market_hours.now_ny()
+    if last is not None and (now - last).total_seconds() < REPORT_RETRY_SEC:
+        return False
+    _last_report_try[kind] = now
+    return True
 
 
 def _today_kst() -> str:
@@ -153,6 +164,8 @@ def _load_state() -> None:
     try:
         state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
         us_sim.load_state(state.get("us_sim"))
+        if isinstance(state.get("date"), str) and state["date"]:
+            _last_ran["date"] = str(state["date"])
         reports = state.get("reports") if isinstance(state.get("reports"), dict) else {}
         if reports.get("mid_report"):
             _last_ran["mid_report"] = str(reports["mid_report"])
@@ -167,7 +180,17 @@ def _load_state() -> None:
 
 def _reset_if_new_day() -> None:
     today = _trading_day()
-    if _last_ran.get("date") and _last_ran["date"] != today:
+    prev = _last_ran.get("date")
+    if prev and prev != today:
+        last_done = market_hours.last_completed_session_day()
+        if (
+            not market_hours.is_us_regular_session()
+            and last_done == prev
+            and not _report_sent("closing", prev)
+        ):
+            print(f"[일별 초기화 보류] {prev} 마감보고 대기")
+            _maybe_closing_report_backup()
+            return
         us_sim.reset_daily()
         _save_state()
         print(f"[일별 초기화] US세션일 {today} (NY)")
@@ -216,10 +239,8 @@ def _limit_sell_price(last: float) -> float:
     return round(max(last * 0.997, 0.01), 2)
 
 
-def _downgrade_to_sim(pos_hint: bool = True) -> None:
-    pos = us_sim.get_open()
-    if pos:
-        pos["is_live"] = False
+def _downgrade_to_sim(symbol: str) -> None:
+    us_sim.downgrade_live_to_sim(symbol)
 
 
 def _check_sim() -> None:
@@ -229,7 +250,7 @@ def _check_sim() -> None:
         events = us_sim.run_check()
         for ev in events:
             if ev.get("action") == "buy":
-                is_live = bool(ev.get("is_live")) and not ev.get("paper")
+                is_live = bool(ev.get("is_live"))
                 if is_live:
                     try:
                         order_px = _limit_buy_price(float(ev["price"]))
@@ -243,7 +264,7 @@ def _check_sim() -> None:
                         )
                     except Exception as e:
                         print(f"[실전매수 실패→시뮬] {e}")
-                        _downgrade_to_sim()
+                        _downgrade_to_sim(ev["symbol"])
                         notifier.notify_error(f"실전 매수 실패 → 시뮬로 전환: {e}")
                         notifier.notify_sim_buy(
                             ev["symbol"], ev["exchange"], ev["quantity"],
@@ -255,7 +276,7 @@ def _check_sim() -> None:
                         ev["price"], ev["reason"],
                     )
             elif ev.get("action") == "sell":
-                is_live = bool(ev.get("is_live")) and not ev.get("paper")
+                is_live = bool(ev.get("is_live"))
                 if is_live:
                     try:
                         order_px = _limit_sell_price(float(ev["sell_price"]))
@@ -318,8 +339,9 @@ def _format_open_position_lines() -> list[str]:
             buy = float(ppos["buy_price"])
             pct = (price - buy) / buy * 100 if buy > 0 else 0
             tag = ppos.get("strategy") or ""
+            mode = "실전" if ppos.get("is_live") else "병렬시뮬"
             lines.append(
-                f"  [병렬시뮬] {tag+' ' if tag else ''}{sym} "
+                f"  [{mode}] {tag+' ' if tag else ''}{sym} "
                 f"{pct:+.1f}% @ ${price:.2f}"
             )
         except Exception as e:
@@ -341,15 +363,23 @@ def _append_watchlist_section(lines: list[str]) -> None:
         lines.append("⚠️ 순위 풀 비어 중형 폴백 사용")
 
 
-def _run_mid_report() -> None:
-    """KST 지정 시각 — 정규장 중간 보고 (1회/세션)."""
+def _maybe_mid_report() -> None:
+    """NY 정오 이후 정규장 중이면 발송. 5분 창이 아니라 세션 끝날 때까지 재시도."""
     if not market_hours.is_us_regular_session():
         return
+    if market_hours.now_ny().hour < MID_REPORT_HOUR_NY:
+        return
+    _run_mid_report()
+
+
+def _run_mid_report() -> None:
+    """정규장 중간 보고 (1회/세션)."""
     ny_day = _trading_day()
     if _report_sent("mid", ny_day):
         return
-    _mark_report_sent("mid", ny_day)
-    print(f"[US보고] 중간 보고 ({market_hours.now_kst().strftime('%H:%M')} KST)")
+    if not _report_retry_ok("mid"):
+        return
+    print(f"[US보고] 중간 보고 (NY {market_hours.now_ny().strftime('%H:%M')})")
 
     lines = us_sim.format_session_report(closing=False)
     pos_lines = _format_open_position_lines()
@@ -358,43 +388,51 @@ def _run_mid_report() -> None:
         lines.extend(pos_lines)
         lines.append("")
     _append_watchlist_section(lines)
-    notifier.send("\n".join(lines))
-    _save_state()
+    if notifier.send("\n".join(lines)):
+        _mark_report_sent("mid", ny_day)
+        _save_state()
 
 
-def _run_closing_report() -> None:
+def _run_closing_report(ny_day: str | None = None) -> None:
     """미국 정규장 마감 — 최종 손익 보고 (1회/세션)."""
-    ny_day = _trading_day()
+    ny_day = ny_day or market_hours.last_completed_session_day()
     if _report_sent("closing", ny_day):
         return
-    _mark_report_sent("closing", ny_day)
+    if not _report_retry_ok("closing"):
+        return
     print(f"[US보고] 장마감 보고 (NY {ny_day})")
 
-    lines = us_sim.format_session_report(closing=True)
+    lines = us_sim.format_session_report(closing=True, ny_day=ny_day)
     _append_watchlist_section(lines)
-    notifier.send("\n".join(lines))
-    _save_state()
+    if notifier.send("\n".join(lines)):
+        _mark_report_sent("closing", ny_day)
+        _save_state()
 
 
 def _in_closing_report_window() -> bool:
-    """NY 정규장 마감(16:00) 직후 ~ 당일 밤 — 백업 보고 허용 구간."""
-    ny = market_hours.now_ny()
-    if ny.weekday() >= 5:
-        return False
+    """직전 세션 마감 이후 ~ 다음 정규장 개장 전 (주말 포함)."""
     if market_hours.is_us_regular_session():
         return False
-    tmin = ny.hour * 60 + ny.minute
-    close_min = 16 * 60
-    return close_min + 5 <= tmin <= 23 * 60 + 59
+    ny = market_hours.now_ny()
+    if ny.weekday() < 5 and ny.time() < market_hours.REGULAR_OPEN:
+        return True
+    if ny.weekday() < 5 and ny.time() >= market_hours.REGULAR_CLOSE:
+        return True
+    return ny.weekday() >= 5
 
 
 def _maybe_closing_report_backup() -> None:
-    """세션 종료 edge를 놓친 경우(재시작·다운) 마감 보고 복구."""
-    if _report_sent("closing"):
+    """세션 종료 edge를 놓친 경우(재시작·주말) 마감 보고 복구."""
+    if market_hours.is_us_regular_session():
+        return
+    session_day = market_hours.last_completed_session_day()
+    if _report_sent("closing", session_day):
         return
     if not _in_closing_report_window():
         return
-    print("[US보고] 마감 보고 백업 트리거 (세션 종료 감지 누락 복구)")
+    if not _report_retry_ok("closing_backup"):
+        return
+    print(f"[US보고] 마감 보고 백업 트리거 ({session_day})")
     _session_end_close()
 
 
@@ -456,7 +494,7 @@ def _session_end_close() -> None:
         notifier.notify_error(f"US 정규장 종료 청산 오류: {e}")
     finally:
         _save_state()
-        _run_closing_report()
+        _run_closing_report(market_hours.last_completed_session_day())
 
 
 def main() -> None:
@@ -490,13 +528,13 @@ def main() -> None:
         f"청산: 익절 +{us_sim.TAKE_PROFIT_PCT:g}% / 손절 -{us_sim.STOP_LOSS_PCT:g}%\n"
         f"시뮬: {'ON' if us_sim.is_enabled() else 'OFF'} "
         f"(${us_sim.SIM_AMOUNT_USD:g}) / "
-        f"실전: {'ON 방식A 점수최고1종' if LIVE_ORDERS else 'OFF'} "
+        f"실전: {'ON 방식A 점수순 최대 ' + str(us_sim.LIVE_MAX_POSITIONS) + '종' if LIVE_ORDERS else 'OFF'} "
         f"(${us_sim.LIVE_AMOUNT_USD:g}/회 · 총한도 ${us_sim.MAX_TOTAL_USD:g})\n"
         f"병렬시뮬: {'ON' if us_sim.PARALLEL_SIM else 'OFF'} "
         f"(최대 {us_sim.MAX_SIM_POSITIONS}종) · "
         f"스킵알림 {us_sim.SKIP_NOTIFY_INTERVAL_MIN}분\n"
         f"점검 주기: {POLL_MIN}분 · 스크린 {us_screener.SCREEN_INTERVAL_MIN}분\n"
-        f"보고: 중간 KST {MID_REPORT_HOUR_KST:02d}:00 · 마감 NY 종료\n"
+        f"보고: 중간 NY {MID_REPORT_HOUR_NY:02d}:00 이후 · 마감 NY 종료(미발송 시 재시도)\n"
         f"⚠️ 국내 kis-trading-bot과 별도 Railway 서비스"
     )
 

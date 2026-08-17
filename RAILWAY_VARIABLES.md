@@ -19,7 +19,8 @@
 | Variable | 기본값 | 설명 |
 |----------|--------|------|
 | `ENABLE_US_SIM` | `true` | 미국 시뮬 ON |
-| `ENABLE_US_LIVE_ORDERS` | `false` | 방식A: 같은 점검 점수최고 1종만 실주문(세션 1회) |
+| `ENABLE_US_LIVE_ORDERS` | `false` | 방식A: 같은 점검 점수순 실주문(세션 `US_LIVE_MAX_POSITIONS`종) |
+| `US_LIVE_MAX_POSITIONS` | `2` | 세션당 실전 진입 최대 종목 수 |
 | `US_LIVE_AMOUNT_USD` | `750` (미설정 시 시뮬과 동일) | 실전 1회 매수 예산(USD, ≈100만원) |
 | `US_MAX_TOTAL_USD` | `1500` | 실전 총 투자 한도(USD, ≈200만원) |
 | `US_DYNAMIC_WATCHLIST` | `true` | 동적 스크리너 |
@@ -47,8 +48,7 @@
 | `US_PARALLEL_SIM` | `true` | 주포지션 보유 중 다른 종목 병렬 시뮬 |
 | `US_MAX_SIM_POSITIONS` | `5` | 병렬 시뮬 최대 종목 수 |
 | `US_SKIP_NOTIFY_INTERVAL_MIN` | `30` | 워치 스킵 사유 텔레그램 요약 주기(분) |
-| `US_MID_REPORT_HOUR_KST` | `1` | 정규장 중간 보고 시각(KST, 1회/세션) |
-| `US_REPORT_WINDOW_MIN` | `5` | 중간 보고 허용 분(0~N-1분) |
+| `US_MID_REPORT_HOUR_NY` | `12` | 정규장 중간 보고 (NY 시각 이후 세션 중 1회, 놓치면 재시도) |
 | `US_LOOP_STALE_SEC` | `300` | 정규장 중 루프 5분 무응답 시 헬스 503 → Railway 재시작 |
 | `US_HEARTBEAT_HOUR_KST` | `22` | 일일 하트비트(KST) |
 | `API_SECRET` | (임의) | `/health` 보호용 |
