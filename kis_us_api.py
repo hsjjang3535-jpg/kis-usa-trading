@@ -125,7 +125,7 @@ def _get(path: str, tr_id: str, params: dict, kind: str = "market") -> dict:
                 f"{url}{path}",
                 headers=_headers(tr_id, kind),
                 params=params,
-                timeout=20,
+                timeout=10,
             )
             if res.status_code == 500 and attempt < 2:
                 time.sleep(1 + attempt)
@@ -155,7 +155,7 @@ def _post(path: str, tr_id: str, body: dict) -> dict:
                 f"{TRADE_URL}{path}",
                 headers=_headers(tr_id, "trade"),
                 json=body,
-                timeout=20,
+                timeout=10,
             )
             if res.status_code == 500 and attempt < 2:
                 time.sleep(1 + attempt)

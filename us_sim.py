@@ -264,17 +264,26 @@ def should_notify_skips() -> bool:
     return (now - _last_skip_notify_at).total_seconds() >= SKIP_NOTIFY_INTERVAL_MIN * 60
 
 
-def consume_skip_digest() -> list[str]:
-    """심볼별 마지막 스킵 사유 요약 후 버퍼 비움."""
-    global _last_skips, _last_skip_notify_at
+def peek_skip_digest() -> list[str]:
     if not _last_skips:
         return []
     by_sym: dict[str, str] = {}
     for s in _last_skips:
         by_sym[s["symbol"]] = s["reason"]
-    lines = [f"· {sym}: {why}" for sym, why in sorted(by_sym.items())]
+    return [f"· {sym}: {why}" for sym, why in sorted(by_sym.items())]
+
+
+def mark_skips_consumed() -> None:
+    global _last_skips, _last_skip_notify_at
     _last_skips = []
     _last_skip_notify_at = datetime.now(KST)
+
+
+def consume_skip_digest() -> list[str]:
+    """심볼별 마지막 스킵 사유 요약 후 버퍼 비움."""
+    lines = peek_skip_digest()
+    if lines:
+        mark_skips_consumed()
     return lines
 
 
@@ -363,17 +372,17 @@ def _match_s_rule(
     closes = [current] + [b["close"] for b in daily[1:]]
     day_pct = _day_pct(daily, current)
     if day_pct < MIN_DAY_PCT:
-        return False, f"S:당일{day_pct:+.1f}%<{MIN_DAY_PCT:g}%", 0.0
+        return False, f"S:당일{day_pct:+.1f}% 미만{MIN_DAY_PCT:g}%", 0.0
     ma20 = sum(closes[:20]) / 20
     if current < ma20:
         return False, f"S:MA20아래(${ma20:.2f})", 0.0
     rsi = _rsi(closes, 14)
     if rsi > MAX_RSI:
-        return False, f"S:RSI{rsi:.0f}>{MAX_RSI:g}", 0.0
+        return False, f"S:RSI{rsi:.0f} 초과{MAX_RSI:g}", 0.0
     check_vol = today_vol if today_vol > 0 else float(daily[0].get("volume") or 0)
     rvol = _rvol(daily, check_vol)
     if rvol < MIN_RVOL:
-        return False, f"S:RVOL{rvol:.1f}x<{MIN_RVOL:g}", 0.0
+        return False, f"S:RVOL{rvol:.1f}x 미만{MIN_RVOL:g}", 0.0
     ok_vwap, vwap = _above_vwap(symbol, exchange, current)
     if not ok_vwap:
         return False, f"S:VWAP아래(${vwap:.2f})", 0.0
@@ -431,10 +440,10 @@ def _match_orb(
         return False, f"ORB:미돌파(OR고${or_high:.2f})", 0.0
     day_pct = _day_pct(daily, price)
     if day_pct < ORB_MIN_DAY_PCT:
-        return False, f"ORB:당일{day_pct:+.1f}%<{ORB_MIN_DAY_PCT:g}%", 0.0
+        return False, f"ORB:당일{day_pct:+.1f}% 미만{ORB_MIN_DAY_PCT:g}%", 0.0
     rvol = _rvol(daily, today_vol if today_vol > 0 else float(daily[0].get("volume") or 0))
     if rvol < ORB_MIN_RVOL:
-        return False, f"ORB:RVOL{rvol:.1f}x<{ORB_MIN_RVOL:g}", 0.0
+        return False, f"ORB:RVOL{rvol:.1f}x 미만{ORB_MIN_RVOL:g}", 0.0
     ok_vwap, vwap = _above_vwap(symbol, exchange, price)
     if not ok_vwap:
         return False, f"ORB:VWAP아래(${vwap:.2f})", 0.0
@@ -470,7 +479,7 @@ def _match_gap_and_go(
         return False, "GapGo:갭페이드", 0.0
     rvol = _rvol(daily, today_vol if today_vol > 0 else float(daily[0].get("volume") or 0))
     if rvol < GAP_MIN_RVOL:
-        return False, f"GapGo:RVOL{rvol:.1f}x<{GAP_MIN_RVOL:g}", 0.0
+        return False, f"GapGo:RVOL{rvol:.1f}x 미만{GAP_MIN_RVOL:g}", 0.0
     st = _update_orb(symbol, price, day_high, day_low)
     if not st or not st.get("ready"):
         return False, "GapGo:ORB미확정", 0.0
@@ -647,6 +656,11 @@ def run_check() -> list[dict]:
         return []
     events: list[dict] = []
     _vwap_cache = {}
+    try:
+        import api_server as _api
+        _touch = _api.touch_loop
+    except Exception:
+        _touch = lambda: None
 
     # ── 주포지션 청산 ──────────────────────────────────────────
     if _open:
@@ -695,6 +709,7 @@ def run_check() -> list[dict]:
     candidates: list[dict] = []
 
     for symbol, exchange in _active_watchlist():
+        _touch()
         if symbol in _bought_symbols_today or symbol in held:
             continue
         if us_screener.is_mega_cap(symbol):

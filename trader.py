@@ -306,9 +306,9 @@ def _check_sim() -> None:
             _save_state()
 
         if us_sim.should_notify_skips():
-            digest = us_sim.consume_skip_digest()
-            if digest:
-                notifier.notify_skip_digest(digest)
+            digest = us_sim.peek_skip_digest()
+            if digest and notifier.notify_skip_digest(digest):
+                us_sim.mark_skips_consumed()
     except Exception as e:
         print(f"[US시뮬] 오류: {e}")
         notifier.notify_error(f"US 시뮬 오류: {e}")

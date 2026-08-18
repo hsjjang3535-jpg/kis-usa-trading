@@ -289,10 +289,13 @@ def run_screening(force: bool = False) -> list[dict]:
         return list(_watchlist)
 
     now = datetime.now(KST)
+    interval_min = SCREEN_INTERVAL_MIN
+    if str(_last_stats.get("mode") or "").startswith("fallback"):
+        interval_min = min(interval_min, 5)
     if (
         not force
         and _last_screen_at is not None
-        and (now - _last_screen_at).total_seconds() < SCREEN_INTERVAL_MIN * 60
+        and (now - _last_screen_at).total_seconds() < interval_min * 60
         and _watchlist
     ):
         return list(_watchlist)
