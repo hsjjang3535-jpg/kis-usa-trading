@@ -28,6 +28,7 @@
 | `US_SCREEN_MIN_SCORE` | `2.0` | 유동 TOP 점수 하한 |
 | `US_SCREEN_MIN_RATE` | `2.0` | 스크린 등락률 하한(%) |
 | `US_SCREEN_INTERVAL_MIN` | `30` | 후보 재갱신 주기(분) |
+| `US_SCREEN_VOL_RANG` | `0` | 순위 거래량 조건 (0=전체. 3이면 개장 직후 빈 풀이 잦음) |
 | `US_SCREEN_INCLUDE_NYS` | `true` | 뉴욕 순위 합치기 |
 | `US_EXCLUDE_MEGA_CAP` | `true` | 시총 상위·초대형 블록 제외 |
 | `US_MEGA_CAP_RANK_CUTOFF` | `50` | 시총순위 이내 제외 |

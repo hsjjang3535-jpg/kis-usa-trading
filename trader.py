@@ -218,6 +218,7 @@ def _run_screen(force: bool = False, *, notify: bool = False) -> None:
             notifier.send(
                 f"🇺🇸 <b>US 스크리너</b> ({mode})\n"
                 f"유동 {len(wl)}/{us_screener.MAX_WATCH} · "
+                f"풀 {stats.get('pool', '?')} · "
                 f"등락≥{stats.get('min_rate', '?')}% · "
                 f"점수≥{stats.get('min_score', '?')} · "
                 f"메가제외 {stats.get('mega_excluded', '?')} · "

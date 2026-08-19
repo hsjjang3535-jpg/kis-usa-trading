@@ -29,7 +29,7 @@ MIN_RATE_RELAXED = float(os.getenv("US_SCREEN_MIN_RATE_RELAXED", "0.5"))
 MIN_SCORE = float(os.getenv("US_SCREEN_MIN_SCORE", "2.0"))  # 유동 TOP 점수 하한
 MIN_SCORE_RELAXED = float(os.getenv("US_SCREEN_MIN_SCORE_RELAXED", "0.5"))
 MIN_PRICE = float(os.getenv("US_SCREEN_MIN_PRICE", "5.0"))
-VOL_RANG = os.getenv("US_SCREEN_VOL_RANG", "3")
+VOL_RANG = os.getenv("US_SCREEN_VOL_RANG", "0")
 VOL_RANG_RELAXED = os.getenv("US_SCREEN_VOL_RANG_RELAXED", "0")
 INCLUDE_NYS = os.getenv("US_SCREEN_INCLUDE_NYS", "true").lower() == "true"
 SCREEN_INTERVAL_MIN = int(os.getenv("US_SCREEN_INTERVAL_MIN", "30"))
@@ -101,11 +101,14 @@ def get_last_stats() -> dict:
     return dict(_last_stats)
 
 
-def is_mega_cap(symbol: str) -> bool:
+def is_mega_cap(symbol: str, *, rank: bool = True) -> bool:
+    """rank=False면 초대형 블록리스트만 (시총상위 컷 생략)."""
     sym = symbol.upper()
     if EXCLUDE_MEGA and sym in MEGA_BLOCKLIST:
         return True
-    return EXCLUDE_MEGA and sym in _mega_symbols
+    if rank and EXCLUDE_MEGA and sym in _mega_symbols:
+        return True
+    return False
 
 
 def tradeable_count(watch: list[dict] | None = None) -> int:
@@ -155,16 +158,14 @@ def _refresh_mega_set(exchanges: list[str]) -> int:
     return len(mega)
 
 
-def _merge_pool(rows: list[dict], source: str, *, min_rate: float) -> dict[str, dict]:
+def _merge_pool(rows: list[dict], source: str, *, min_rate: float, rank_mega: bool = False) -> dict[str, dict]:
     pool: dict[str, dict] = {}
     for r in rows:
-        if not r.get("tradable", True):
-            continue
         if float(r.get("last") or 0) < MIN_PRICE:
             continue
         if float(r.get("rate") or 0) < min_rate:
             continue
-        if is_mega_cap(r["symbol"]):
+        if is_mega_cap(r["symbol"], rank=rank_mega):
             continue
         key = f"{r['exchange']}:{r['symbol']}"
         item = {
@@ -213,7 +214,9 @@ def _collect_primary(exchanges: list[str], vol_rang: str) -> tuple[dict, dict, l
     pool: dict[str, dict] = {}
     for ex in exchanges:
         try:
-            rows = kis_us_api.get_volume_surge(ex, mixn="3", vol_rang=vol_rang)
+            rows = kis_us_api.get_volume_surge(ex, mixn="0", vol_rang=vol_rang)
+            if not rows:
+                rows = kis_us_api.get_volume_surge(ex, mixn="3", vol_rang=vol_rang)
             counts["surge"] += len(rows)
             pool.update(_merge_pool(rows, "volume_surge", min_rate=-999))  # rate는 나중에
         except Exception as e:
@@ -262,14 +265,14 @@ def _collect_secondary(exchanges: list[str], vol_rang: str) -> tuple[dict, dict,
     return pool, counts, errors
 
 
-def _filter_pool(raw_pool: dict[str, dict], *, min_rate: float) -> dict[str, dict]:
+def _filter_pool(raw_pool: dict[str, dict], *, min_rate: float, rank_mega: bool = True) -> dict[str, dict]:
     out: dict[str, dict] = {}
     for key, item in raw_pool.items():
         if float(item.get("rate") or 0) < min_rate:
             continue
         if float(item.get("last") or 0) < MIN_PRICE:
             continue
-        if is_mega_cap(item["symbol"]):
+        if is_mega_cap(item["symbol"], rank=rank_mega):
             continue
         out[key] = item
     return out
@@ -312,6 +315,12 @@ def run_screening(force: bool = False) -> list[dict]:
     raw1, c1, e1 = _collect_primary(exchanges, VOL_RANG)
     counts.update(c1)
     errors.extend(e1)
+    if not raw1 and VOL_RANG != "0":
+        raw1b, c1b, e1b = _collect_primary(exchanges, "0")
+        for k, v in c1b.items():
+            counts[k] = counts.get(k, 0) + v
+        errors.extend(e1b)
+        raw1 = raw1b
     pool = _filter_pool(raw1, min_rate=MIN_RATE)
     used_rate = MIN_RATE
     used_score = MIN_SCORE
@@ -324,6 +333,7 @@ def run_screening(force: bool = False) -> list[dict]:
         used_score = MIN_SCORE_RELAXED
         stage = "primary_relaxed"
 
+    raw2: dict[str, dict] = {}
     # 2차 확장 순위
     if not pool:
         raw2, c2, e2 = _collect_secondary(exchanges, VOL_RANG)
@@ -333,16 +343,26 @@ def run_screening(force: bool = False) -> list[dict]:
         used_rate = MIN_RATE_RELAXED
         used_score = MIN_SCORE_RELAXED
         stage = "secondary"
-        # 2차도 비면 거래량조건 완화
         if not pool and VOL_RANG_RELAXED != VOL_RANG:
             raw2b, c2b, e2b = _collect_secondary(exchanges, VOL_RANG_RELAXED)
             for k, v in c2b.items():
                 counts[k] = counts.get(k, 0) + v
             errors.extend(e2b)
-            pool = _filter_pool(raw2b, min_rate=0.0)
+            raw2.update(raw2b)
+            pool = _filter_pool(raw2, min_rate=0.0)
             used_rate = 0.0
             used_score = MIN_SCORE_RELAXED
             stage = "secondary_relaxed"
+
+    # 시총상위 컷 때문에 풀이 비면, 초대형 블록만 제외하고 중형 순위 사용
+    if not pool:
+        combined = dict(raw1)
+        combined.update(raw2)
+        pool = _filter_pool(combined, min_rate=0.0, rank_mega=False)
+        if pool:
+            used_rate = 0.0
+            used_score = MIN_SCORE_RELAXED
+            stage = "midcap_rank"
 
     picked = _select_fluid(pool, min_score=used_score)
     if not picked and pool:
