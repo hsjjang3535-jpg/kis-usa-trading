@@ -57,7 +57,7 @@ GAP_ENTRY_UNTIL = int(os.getenv("US_GAP_ENTRY_UNTIL_MIN", "90"))
 
 PARALLEL_SIM = os.getenv("US_PARALLEL_SIM", "true").lower() == "true"
 MAX_SIM_POSITIONS = int(os.getenv("US_MAX_SIM_POSITIONS", "5"))
-SKIP_NOTIFY_INTERVAL_MIN = int(os.getenv("US_SKIP_NOTIFY_INTERVAL_MIN", "30"))
+SKIP_NOTIFY_INTERVAL_MIN = int(os.getenv("US_SKIP_NOTIFY_INTERVAL_MIN", "120"))
 
 _open: dict | None = None  # 주포지션 (실전 가능)
 _paper: dict[str, dict] = {}  # 병렬 시뮬 symbol -> pos
@@ -256,11 +256,14 @@ def get_latest_skip_lines(max_items: int = 8) -> list[str]:
 
 
 def should_notify_skips() -> bool:
+    """주기적으로만. 첫 점검은 타이머만 시작하고 바로 보내지 않음."""
+    global _last_skip_notify_at
     if not _last_skips:
         return False
     now = datetime.now(KST)
     if _last_skip_notify_at is None:
-        return True
+        _last_skip_notify_at = now
+        return False
     return (now - _last_skip_notify_at).total_seconds() >= SKIP_NOTIFY_INTERVAL_MIN * 60
 
 

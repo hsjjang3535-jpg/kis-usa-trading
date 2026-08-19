@@ -48,7 +48,7 @@
 | `US_SIM_TAKE_PROFIT_PCT` | `5.0` | 익절 % (하드) |
 | `US_PARALLEL_SIM` | `true` | 주포지션 보유 중 다른 종목 병렬 시뮬 |
 | `US_MAX_SIM_POSITIONS` | `5` | 병렬 시뮬 최대 종목 수 |
-| `US_SKIP_NOTIFY_INTERVAL_MIN` | `30` | 워치 스킵 사유 텔레그램 요약 주기(분) |
+| `US_SKIP_NOTIFY_INTERVAL_MIN` | `120` | 워치 스킵 사유 텔레그램 요약 주기(분). 개장 직후는 생략 |
 | `US_MID_REPORT_HOUR_NY` | `12` | 정규장 중간 보고 (NY 시각 이후 세션 중 1회, 놓치면 재시도) |
 | `US_LOOP_STALE_SEC` | `300` | 정규장 중 루프 5분 무응답 시 헬스 503 → Railway 재시작 |
 | `US_HEARTBEAT_HOUR_KST` | `22` | 일일 하트비트(KST) |
