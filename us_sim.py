@@ -10,7 +10,8 @@
 보유 포지션은 진입 스캔과 별도로 더 자주 점검 가능 (US_EXIT_POLL_SEC).
 
 방식 A: 같은 점검에서 조건 통과 종목 중 신호점수 순으로
-세션 실주문(US_LIVE_MAX_POSITIONS, 기본 2종). 나머지는 병렬 시뮬 (US_PARALLEL_SIM).
+세션 실주문(US_LIVE_MAX_POSITIONS, 기본 3회). 나머지는 병렬 시뮬 (US_PARALLEL_SIM).
+동시 실전 보유는 US_MAX_TOTAL_USD(기본 $1500)로 약 2종.
 """
 from __future__ import annotations
 
@@ -31,8 +32,8 @@ SIM_AMOUNT_USD = float(os.getenv("US_SIM_AMOUNT_USD", "750"))
 LIVE_AMOUNT_USD = float(os.getenv("US_LIVE_AMOUNT_USD", os.getenv("US_SIM_AMOUNT_USD", "750")))
 # 실전 총 투자 한도 ≈200만원
 MAX_TOTAL_USD = float(os.getenv("US_MAX_TOTAL_USD", "1500"))
-# 세션당 실전 최대 종목 수 (1종≈750USD × 2 = 총한도 1500)
-LIVE_MAX_POSITIONS = int(os.getenv("US_LIVE_MAX_POSITIONS", "2"))
+# 세션당 실전 진입 최대 횟수 (손절 후 재진입 포함). 동시 보유는 총한도≈2종
+LIVE_MAX_POSITIONS = int(os.getenv("US_LIVE_MAX_POSITIONS", "3"))
 STOP_LOSS_PCT = float(os.getenv("US_SIM_STOP_LOSS_PCT", "2.0"))
 TAKE_PROFIT_PCT = float(os.getenv("US_SIM_TAKE_PROFIT_PCT", "5.0"))
 MIN_DAY_PCT = float(os.getenv("US_SIM_MIN_DAY_PCT", "3.0"))

@@ -100,7 +100,7 @@ def notify_live_buy(symbol: str, exchange: str, qty: int, price: float, reason: 
         f"{qty}주 @ ${price:.2f}\n"
         f"{reason}\n"
         f"⚠️ 실주문 — 방식A 점수순 "
-        f"(세션 최대 {os.getenv('US_LIVE_MAX_POSITIONS', '2')}종)"
+        f"(세션 최대 {os.getenv('US_LIVE_MAX_POSITIONS', '3')}종)"
     )
 
 

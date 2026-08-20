@@ -20,7 +20,7 @@
 |----------|--------|------|
 | `ENABLE_US_SIM` | `true` | 미국 시뮬 ON |
 | `ENABLE_US_LIVE_ORDERS` | `false` | 방식A: 같은 점검 점수순 실주문(세션 `US_LIVE_MAX_POSITIONS`종) |
-| `US_LIVE_MAX_POSITIONS` | `2` | 세션당 실전 진입 최대 종목 수 |
+| `US_LIVE_MAX_POSITIONS` | `3` | 세션당 실전 진입 최대 횟수. 동시 보유는 `US_MAX_TOTAL_USD`로 ≈2종 |
 | `US_LIVE_AMOUNT_USD` | `750` (미설정 시 시뮬과 동일) | 실전 1회 매수 예산(USD, ≈100만원) |
 | `US_MAX_TOTAL_USD` | `1500` | 실전 총 투자 한도(USD, ≈200만원) |
 | `US_DYNAMIC_WATCHLIST` | `true` | 동적 스크리너 |
