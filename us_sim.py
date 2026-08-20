@@ -7,6 +7,7 @@
   3) S·RVOL — 일봉 모멘텀 + 시간보정 RVOL + VWAP 위
 
 청산: -2% 손절 / +5% 익절 (하드) / 정규장 종료 강제청산
+보유 포지션은 진입 스캔과 별도로 더 자주 점검 가능 (US_EXIT_POLL_SEC).
 
 방식 A: 같은 점검에서 조건 통과 종목 중 신호점수 순으로
 세션 실주문(US_LIVE_MAX_POSITIONS, 기본 2종). 나머지는 병렬 시뮬 (US_PARALLEL_SIM).
@@ -89,6 +90,10 @@ def get_open() -> dict | None:
 
 def get_paper_positions() -> dict[str, dict]:
     return dict(_paper)
+
+
+def has_open_positions() -> bool:
+    return _open is not None or bool(_paper)
 
 
 def get_trades_today() -> list[dict]:
@@ -652,20 +657,15 @@ def _open_position(
     return pos
 
 
-def run_check() -> list[dict]:
-    """정규장 중 호출. 이벤트 리스트 반환."""
-    global _open, _vwap_cache, _paper
+def run_exit_check() -> list[dict]:
+    """보유 포지션만 손절·익절 점검. 신규 진입 스캔 없음."""
+    global _open, _paper
     if not ENABLED or not market_hours.is_us_regular_session():
         return []
+    if not _open and not _paper:
+        return []
     events: list[dict] = []
-    _vwap_cache = {}
-    try:
-        import api_server as _api
-        _touch = _api.touch_loop
-    except Exception:
-        _touch = lambda: None
 
-    # ── 주포지션 청산 ──────────────────────────────────────────
     if _open:
         try:
             px = kis_us_api.get_us_price(_open["symbol"], _open["exchange"])
@@ -682,7 +682,6 @@ def run_check() -> list[dict]:
                 if t:
                     events.append(t)
 
-    # ── 병렬 시뮬 청산 ─────────────────────────────────────────
     for sym in list(_paper.keys()):
         pos = _paper[sym]
         try:
@@ -700,6 +699,21 @@ def run_check() -> list[dict]:
             t = force_close_paper(sym, price, reason)
             if t:
                 events.append(t)
+    return events
+
+
+def run_check() -> list[dict]:
+    """정규장 중 호출. 청산 + 신규 진입. 이벤트 리스트 반환."""
+    global _open, _vwap_cache, _paper
+    if not ENABLED or not market_hours.is_us_regular_session():
+        return []
+    events = run_exit_check()
+    _vwap_cache = {}
+    try:
+        import api_server as _api
+        _touch = _api.touch_loop
+    except Exception:
+        _touch = lambda: None
 
     # ── 신규 스캔: 전부 평가 후 점수순 배정 ─────────────────────
     held = set()

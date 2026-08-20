@@ -42,7 +42,8 @@
 | `US_ORB_MINUTES` | `15` | ORB 레인지 분 |
 | `US_SIM_MIN_RVOL` | `2.5` | S 시간보정 RVOL 하한 |
 | `US_WATCHLIST` | `AAPL:NAS,...` | 동적 실패 시 폴백 / 고정 모드 |
-| `US_POLL_INTERVAL_MIN` | `5` | 정규장 점검 주기(분) |
+| `US_POLL_INTERVAL_MIN` | `5` | 정규장 점검 주기(분) — 신규 진입·스크리너 |
+| `US_EXIT_POLL_SEC` | `60` | 보유 종목 손절·익절만 (초). 매수 후에만 동작 |
 | `US_SIM_AMOUNT_USD` | `750` | 시뮬 1회 가상 매수(USD, ≈100만원) |
 | `US_SIM_STOP_LOSS_PCT` | `2.0` | 손절 % |
 | `US_SIM_TAKE_PROFIT_PCT` | `5.0` | 익절 % (하드) |

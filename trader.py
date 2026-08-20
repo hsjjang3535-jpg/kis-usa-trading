@@ -31,6 +31,8 @@ load_dotenv()
 KST = ZoneInfo("Asia/Seoul")
 STATE_FILE = Path(__file__).resolve().parent / "trading_state.json"
 POLL_MIN = int(os.getenv("US_POLL_INTERVAL_MIN", "5"))
+# 보유 포지션 손절·익절만 (초). 신규 진입 스캔과 분리.
+EXIT_POLL_SEC = int(os.getenv("US_EXIT_POLL_SEC", "60"))
 LIVE_ORDERS = os.getenv("ENABLE_US_LIVE_ORDERS", "false").lower() == "true"
 MID_REPORT_HOUR_NY = int(os.getenv("US_MID_REPORT_HOUR_NY", "12"))
 
@@ -59,9 +61,10 @@ def _notify_loop_error(exc: Exception) -> None:
 def _run_loop_tick(
     *,
     last_poll_min: int,
+    last_exit_at: float,
     session_open_notified: bool,
-) -> tuple[int, bool]:
-    """메인 루프 1회. (last_poll_min, session_open_notified) 반환."""
+) -> tuple[int, float, bool]:
+    """메인 루프 1회. (last_poll_min, last_exit_at, session_open_notified) 반환."""
     api_server.touch_loop()
     _reset_if_new_day()
     in_session = market_hours.is_us_regular_session()
@@ -83,6 +86,7 @@ def _run_loop_tick(
         session_open_notified = True
         last_poll_min = tmin
         _check_sim()
+        last_exit_at = time.monotonic()
     _was_in_session = in_session
 
     if not in_session:
@@ -90,11 +94,23 @@ def _run_loop_tick(
 
     if in_session:
         _maybe_mid_report()
+        did_full = False
         if last_poll_min < 0 or tmin - last_poll_min >= POLL_MIN or tmin < last_poll_min:
             last_poll_min = tmin
             _run_screen(force=False, notify=True)
             session_open_notified = True
             _check_sim()
+            last_exit_at = time.monotonic()
+            did_full = True
+        # 보유 중이면 신규 스캔과 별도로 손절·익절만 자주 점검
+        if (
+            not did_full
+            and us_sim.has_open_positions()
+            and EXIT_POLL_SEC > 0
+            and (time.monotonic() - last_exit_at) >= EXIT_POLL_SEC
+        ):
+            _check_exits()
+            last_exit_at = time.monotonic()
 
     hb = int(os.getenv("US_HEARTBEAT_HOUR_KST", "22"))
     if now.hour == hb and now.minute < 5 and _last_ran.get("heartbeat") != _today_kst():
@@ -109,7 +125,7 @@ def _run_loop_tick(
         lines.extend(us_sim.format_summary() or ["시뮬 포지션/체결 없음"])
         notifier.send("\n".join(lines))
 
-    return last_poll_min, session_open_notified
+    return last_poll_min, last_exit_at, session_open_notified
 
 
 def _report_sent(kind: str, ny_day: str | None = None) -> bool:
@@ -249,63 +265,7 @@ def _check_sim() -> None:
         return
     try:
         events = us_sim.run_check()
-        for ev in events:
-            if ev.get("action") == "buy":
-                is_live = bool(ev.get("is_live"))
-                if is_live:
-                    try:
-                        order_px = _limit_buy_price(float(ev["price"]))
-                        kis_us_api.buy_us_stock(
-                            ev["symbol"], ev["quantity"], order_px, ev["exchange"],
-                        )
-                        us_sim.mark_live_used()
-                        notifier.notify_live_buy(
-                            ev["symbol"], ev["exchange"], ev["quantity"],
-                            ev["price"], ev["reason"],
-                        )
-                    except Exception as e:
-                        print(f"[실전매수 실패→시뮬] {e}")
-                        _downgrade_to_sim(ev["symbol"])
-                        notifier.notify_error(f"실전 매수 실패 → 시뮬로 전환: {e}")
-                        notifier.notify_sim_buy(
-                            ev["symbol"], ev["exchange"], ev["quantity"],
-                            ev["price"], ev["reason"] + " (실주문실패→시뮬)",
-                        )
-                else:
-                    notifier.notify_sim_buy(
-                        ev["symbol"], ev["exchange"], ev["quantity"],
-                        ev["price"], ev["reason"],
-                    )
-            elif ev.get("action") == "sell":
-                is_live = bool(ev.get("is_live"))
-                if is_live:
-                    try:
-                        order_px = _limit_sell_price(float(ev["sell_price"]))
-                        kis_us_api.sell_us_stock(
-                            ev["symbol"], ev["quantity"], order_px, ev["exchange"],
-                        )
-                        notifier.notify_live_sell(
-                            ev["symbol"], ev["exchange"], ev["quantity"],
-                            ev["buy_price"], ev["sell_price"],
-                            ev["profit_pct"], ev["sell_reason"],
-                        )
-                    except Exception as e:
-                        print(f"[실전매도 실패] {e}")
-                        notifier.notify_error(f"실전 매도 실패(재시도 필요): {e}")
-                        notifier.notify_sim_sell(
-                            ev["symbol"], ev["exchange"], ev["quantity"],
-                            ev["buy_price"], ev["sell_price"],
-                            ev["profit_pct"], ev["sell_reason"] + f" (실주문실패:{e})",
-                        )
-                else:
-                    notifier.notify_sim_sell(
-                        ev["symbol"], ev["exchange"], ev["quantity"],
-                        ev["buy_price"], ev["sell_price"],
-                        ev["profit_pct"], ev["sell_reason"],
-                    )
-        if events:
-            _save_state()
-
+        _dispatch_events(events)
         if us_sim.should_notify_skips():
             digest = us_sim.peek_skip_digest()
             if digest and notifier.notify_skip_digest(digest):
@@ -313,6 +273,79 @@ def _check_sim() -> None:
     except Exception as e:
         print(f"[US시뮬] 오류: {e}")
         notifier.notify_error(f"US 시뮬 오류: {e}")
+
+
+def _check_exits() -> None:
+    """보유 종목 손절·익절만 (신규 진입 스캔 없음)."""
+    if not us_sim.is_enabled():
+        return
+    if not us_sim.has_open_positions():
+        return
+    try:
+        events = us_sim.run_exit_check()
+        _dispatch_events(events)
+    except Exception as e:
+        print(f"[US청산점검] 오류: {e}")
+        notifier.notify_error(f"US 청산점검 오류: {e}")
+
+
+def _dispatch_events(events: list[dict]) -> None:
+    for ev in events:
+        if ev.get("action") == "buy":
+            is_live = bool(ev.get("is_live"))
+            if is_live:
+                try:
+                    order_px = _limit_buy_price(float(ev["price"]))
+                    kis_us_api.buy_us_stock(
+                        ev["symbol"], ev["quantity"], order_px, ev["exchange"],
+                    )
+                    us_sim.mark_live_used()
+                    notifier.notify_live_buy(
+                        ev["symbol"], ev["exchange"], ev["quantity"],
+                        ev["price"], ev["reason"],
+                    )
+                except Exception as e:
+                    print(f"[실전매수 실패→시뮬] {e}")
+                    _downgrade_to_sim(ev["symbol"])
+                    notifier.notify_error(f"실전 매수 실패 → 시뮬로 전환: {e}")
+                    notifier.notify_sim_buy(
+                        ev["symbol"], ev["exchange"], ev["quantity"],
+                        ev["price"], ev["reason"] + " (실주문실패→시뮬)",
+                    )
+            else:
+                notifier.notify_sim_buy(
+                    ev["symbol"], ev["exchange"], ev["quantity"],
+                    ev["price"], ev["reason"],
+                )
+        elif ev.get("action") == "sell":
+            is_live = bool(ev.get("is_live"))
+            if is_live:
+                try:
+                    order_px = _limit_sell_price(float(ev["sell_price"]))
+                    kis_us_api.sell_us_stock(
+                        ev["symbol"], ev["quantity"], order_px, ev["exchange"],
+                    )
+                    notifier.notify_live_sell(
+                        ev["symbol"], ev["exchange"], ev["quantity"],
+                        ev["buy_price"], ev["sell_price"],
+                        ev["profit_pct"], ev["sell_reason"],
+                    )
+                except Exception as e:
+                    print(f"[실전매도 실패] {e}")
+                    notifier.notify_error(f"실전 매도 실패(재시도 필요): {e}")
+                    notifier.notify_sim_sell(
+                        ev["symbol"], ev["exchange"], ev["quantity"],
+                        ev["buy_price"], ev["sell_price"],
+                        ev["profit_pct"], ev["sell_reason"] + f" (실주문실패:{e})",
+                    )
+            else:
+                notifier.notify_sim_sell(
+                    ev["symbol"], ev["exchange"], ev["quantity"],
+                    ev["buy_price"], ev["sell_price"],
+                    ev["profit_pct"], ev["sell_reason"],
+                )
+    if events:
+        _save_state()
 
 
 def _format_open_position_lines() -> list[str]:
@@ -534,7 +567,8 @@ def main() -> None:
         f"병렬시뮬: {'ON' if us_sim.PARALLEL_SIM else 'OFF'} "
         f"(최대 {us_sim.MAX_SIM_POSITIONS}종) · "
         f"스킵알림 {us_sim.SKIP_NOTIFY_INTERVAL_MIN}분\n"
-        f"점검 주기: {POLL_MIN}분 · 스크린 {us_screener.SCREEN_INTERVAL_MIN}분\n"
+        f"점검 주기: {POLL_MIN}분 · 보유청산 {EXIT_POLL_SEC}초 · "
+        f"스크린 {us_screener.SCREEN_INTERVAL_MIN}분\n"
         f"보고: 중간 NY {MID_REPORT_HOUR_NY:02d}:00 이후 · 마감 NY 종료(미발송 시 재시도)\n"
         f"⚠️ 국내 kis-trading-bot과 별도 Railway 서비스"
     )
@@ -542,12 +576,14 @@ def main() -> None:
     global _was_in_session
     _was_in_session = market_hours.is_us_regular_session()
     last_poll_min = -1
+    last_exit_at = 0.0
     session_open_notified = False
 
     while True:
         try:
-            last_poll_min, session_open_notified = _run_loop_tick(
+            last_poll_min, last_exit_at, session_open_notified = _run_loop_tick(
                 last_poll_min=last_poll_min,
+                last_exit_at=last_exit_at,
                 session_open_notified=session_open_notified,
             )
         except Exception as e:
