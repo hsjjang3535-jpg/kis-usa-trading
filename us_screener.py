@@ -35,6 +35,8 @@ INCLUDE_NYS = os.getenv("US_SCREEN_INCLUDE_NYS", "true").lower() == "true"
 SCREEN_INTERVAL_MIN = int(os.getenv("US_SCREEN_INTERVAL_MIN", "30"))
 EXCLUDE_MEGA = os.getenv("US_EXCLUDE_MEGA_CAP", "true").lower() == "true"
 MEGA_RANK_CUTOFF = int(os.getenv("US_MEGA_CAP_RANK_CUTOFF", "50"))
+# 해외 ETP(ETF/ETN/레버리지 등) — 미신청 계좌 실주문 거부(APBK1672) 방지
+EXCLUDE_ETP = os.getenv("US_EXCLUDE_ETP", "true").lower() == "true"
 
 _DEFAULT_MEGA = (
     "AAPL,MSFT,NVDA,GOOGL,GOOG,AMZN,META,TSLA,BRK.B,BRKB,"
@@ -50,10 +52,33 @@ _DEFAULT_MID_FALLBACK = (
     "HOOD:NAS,UBER:NAS,SNAP:NAS,DKNG:NAS,PATH:NAS"
 )
 
+# 이름/심볼에 포함되면 ETP로 간주 (한투 해외ETP 신청 대상)
+_ETP_NAME_KEYWORDS = (
+    "ETF", "ETN", "ETC", "ETP",
+    "2X", "3X", "-2X", "-3X",
+    "LEVERAGE", "LEVERAGED", "INVERSE", "ULTRA",
+    "DIREXION", "PROSHARES", "GRANITESHARES",
+    "DAILY LONG", "DAILY SHORT",
+    "BULL 2", "BEAR 2", "BULL 3", "BEAR 3",
+    "REIT",
+)
+_DEFAULT_ETP_BLOCK = (
+    "TQQQ,SQQQ,UPRO,SPXU,TNA,TZA,SOXL,SOXS,TECL,TECS,"
+    "LABU,LABD,FNGU,FNGD,TQQQ,QLD,QID,SPXL,SPXS,"
+    "XRPT,CONL,BITX,ETHU,NVDL,TSLL,AMDL,AAPU,MSFU,"
+    "NVDX,TSLG,METU,PTIR,MSTX"
+)
+ETP_BLOCKLIST = {
+    s.strip().upper()
+    for s in os.getenv("US_ETP_BLOCKLIST", _DEFAULT_ETP_BLOCK).split(",")
+    if s.strip()
+}
+
 _watchlist: list[dict] = []
 _last_screen_at: datetime | None = None
 _last_stats: dict = {}
 _mega_symbols: set[str] = set()
+_etp_runtime: set[str] = set()  # 주문 거부로 학습한 ETP
 
 
 def _parse_watch_env(raw: str) -> list[dict]:
@@ -70,6 +95,8 @@ def _parse_watch_env(raw: str) -> list[dict]:
             symbol = part.upper()
             exchange = "NAS"
         if EXCLUDE_MEGA and (symbol in MEGA_BLOCKLIST or symbol in _mega_symbols):
+            continue
+        if is_etp(symbol):
             continue
         items.append({
             "symbol": symbol,
@@ -111,9 +138,34 @@ def is_mega_cap(symbol: str, *, rank: bool = True) -> bool:
     return False
 
 
+def is_etp(symbol: str, name: str = "") -> bool:
+    """해외 ETP(ETF/ETN/레버리지 등). 일반주만 매매할 때 제외."""
+    if not EXCLUDE_ETP:
+        return False
+    sym = (symbol or "").strip().upper()
+    if not sym:
+        return False
+    if sym in ETP_BLOCKLIST or sym in _etp_runtime:
+        return True
+    text = f"{sym} {name or ''}".upper()
+    return any(kw in text for kw in _ETP_NAME_KEYWORDS)
+
+
+def mark_etp(symbol: str) -> None:
+    """실주문 ETP 거부 등으로 학습."""
+    sym = (symbol or "").strip().upper()
+    if sym:
+        _etp_runtime.add(sym)
+
+
 def tradeable_count(watch: list[dict] | None = None) -> int:
     wl = watch if watch is not None else get_watchlist()
-    return sum(1 for w in wl if w.get("symbol") and not is_mega_cap(w["symbol"]))
+    return sum(
+        1 for w in wl
+        if w.get("symbol")
+        and not is_mega_cap(w["symbol"])
+        and not is_etp(w["symbol"], w.get("name") or "")
+    )
 
 
 def format_watchlist_preview(limit: int = 8) -> str:
@@ -166,6 +218,8 @@ def _merge_pool(rows: list[dict], source: str, *, min_rate: float, rank_mega: bo
         if float(r.get("rate") or 0) < min_rate:
             continue
         if is_mega_cap(r["symbol"], rank=rank_mega):
+            continue
+        if is_etp(r["symbol"], r.get("name") or ""):
             continue
         key = f"{r['exchange']}:{r['symbol']}"
         item = {
@@ -273,6 +327,8 @@ def _filter_pool(raw_pool: dict[str, dict], *, min_rate: float, rank_mega: bool 
         if float(item.get("last") or 0) < MIN_PRICE:
             continue
         if is_mega_cap(item["symbol"], rank=rank_mega):
+            continue
+        if is_etp(item["symbol"], item.get("name") or ""):
             continue
         out[key] = item
     return out

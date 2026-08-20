@@ -293,6 +293,12 @@ def _dispatch_events(events: list[dict]) -> None:
     for ev in events:
         if ev.get("action") == "buy":
             is_live = bool(ev.get("is_live"))
+            if is_live and us_screener.is_etp(ev["symbol"], ev.get("name") or ""):
+                # 스크리너 누락 시 실주문 시도 전에 차단
+                us_screener.mark_etp(ev["symbol"])
+                _downgrade_to_sim(ev["symbol"])
+                is_live = False
+                print(f"[ETP차단] {ev['symbol']} → 시뮬만")
             if is_live:
                 try:
                     order_px = _limit_buy_price(float(ev["price"]))
@@ -306,6 +312,9 @@ def _dispatch_events(events: list[dict]) -> None:
                     )
                 except Exception as e:
                     print(f"[실전매수 실패→시뮬] {e}")
+                    err = str(e)
+                    if "APBK1672" in err or "ETP" in err.upper():
+                        us_screener.mark_etp(ev["symbol"])
                     _downgrade_to_sim(ev["symbol"])
                     notifier.notify_error(f"실전 매수 실패 → 시뮬로 전환: {e}")
                     notifier.notify_sim_buy(
@@ -315,7 +324,8 @@ def _dispatch_events(events: list[dict]) -> None:
             else:
                 notifier.notify_sim_buy(
                     ev["symbol"], ev["exchange"], ev["quantity"],
-                    ev["price"], ev["reason"],
+                    ev["price"],
+                    ev["reason"] + (" (ETP→시뮬)" if us_screener.is_etp(ev["symbol"]) else ""),
                 )
         elif ev.get("action") == "sell":
             is_live = bool(ev.get("is_live"))

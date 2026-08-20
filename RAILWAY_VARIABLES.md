@@ -31,6 +31,7 @@
 | `US_SCREEN_VOL_RANG` | `0` | 순위 거래량 조건 (0=전체. 3이면 개장 직후 빈 풀이 잦음) |
 | `US_SCREEN_INCLUDE_NYS` | `true` | 뉴욕 순위 합치기 |
 | `US_EXCLUDE_MEGA_CAP` | `true` | 시총 상위·초대형 블록 제외 |
+| `US_EXCLUDE_ETP` | `true` | 해외 ETP(ETF/ETN/레버리지 등) 제외 — 일반주만 |
 | `US_MEGA_CAP_RANK_CUTOFF` | `50` | 시총순위 이내 제외 |
 | `US_FALLBACK_WATCHLIST` | `SOFI:NAS,...` | 1·2차 순위 모두 실패 시에만 |
 | `US_SCREEN_MIN_RATE_RELAXED` | `0.5` | 풀 비면 등락 하한 완화 |

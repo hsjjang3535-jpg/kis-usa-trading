@@ -733,6 +733,15 @@ def run_check() -> list[dict]:
         if us_screener.is_mega_cap(symbol):
             _record_skip(symbol, "메가캡제외")
             continue
+        # 워치에 name이 있으면 ETP 이름 필터 적용
+        wname = ""
+        for w in us_screener.get_watchlist():
+            if w.get("symbol") == symbol:
+                wname = w.get("name") or ""
+                break
+        if us_screener.is_etp(symbol, wname):
+            _record_skip(symbol, "ETP제외(일반주만)")
+            continue
         try:
             px = kis_us_api.get_us_price(symbol, exchange)
             price = float(px["last"])
@@ -780,7 +789,7 @@ def run_check() -> list[dict]:
 
         # 점수 최고(남은 후보 중) → 주포지션. 실전 슬롯 있으면 실주문.
         if primary_free:
-            want_live = _want_live_for_price(price)
+            want_live = _want_live_for_price(price) and not us_screener.is_etp(symbol)
             pos = _open_position(
                 symbol=symbol, exchange=exchange, price=price,
                 reason=reason, strategy=strategy, live=want_live, paper=False,
@@ -806,7 +815,7 @@ def run_check() -> list[dict]:
             continue
 
         # 주포지션 이미 있음 → 병렬 (실전 슬롯 있으면 실전, 아니면 시뮬)
-        want_live = _want_live_for_price(price)
+        want_live = _want_live_for_price(price) and not us_screener.is_etp(symbol)
         if not PARALLEL_SIM and not want_live:
             _record_skip(
                 symbol,
