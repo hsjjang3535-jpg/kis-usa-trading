@@ -40,7 +40,7 @@
 | `ENABLE_US_GAP_GO` | `true` | Gap & Go (시가갭+ORB고+RVOL) |
 | `US_REQUIRE_ABOVE_VWAP` | `true` | 롱은 근사 VWAP 위만 |
 | `US_GAP_MIN_PCT` | `2.5` | Gap&Go 최소 시가갭 % |
-| `US_ORB_MINUTES` | `15` | ORB 레인지 분 |
+| `US_ORB_MINUTES` | `10` | ORB 레인지 분 |
 | `US_SIM_MIN_RVOL` | `2.5` | S 시간보정 RVOL 하한 |
 | `US_WATCHLIST` | `AAPL:NAS,...` | 동적 실패 시 폴백 / 고정 모드 |
 | `US_POLL_INTERVAL_MIN` | `5` | 정규장 점검 주기(분) — 신규 진입·스크리너 |

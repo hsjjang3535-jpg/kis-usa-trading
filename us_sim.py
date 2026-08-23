@@ -47,7 +47,7 @@ ENABLE_GAP_GO = os.getenv("ENABLE_US_GAP_GO", "true").lower() == "true"
 REQUIRE_ABOVE_VWAP = os.getenv("US_REQUIRE_ABOVE_VWAP", "true").lower() == "true"
 VWAP_NMIN = int(os.getenv("US_VWAP_NMIN", "5"))
 
-ORB_MINUTES = int(os.getenv("US_ORB_MINUTES", "15"))
+ORB_MINUTES = int(os.getenv("US_ORB_MINUTES", "10"))
 ORB_ENTRY_UNTIL = int(os.getenv("US_ORB_ENTRY_UNTIL_MIN", "120"))
 ORB_MIN_RVOL = float(os.getenv("US_ORB_MIN_RVOL", "1.5"))
 ORB_MIN_DAY_PCT = float(os.getenv("US_ORB_MIN_DAY_PCT", "1.0"))
