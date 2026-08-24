@@ -206,6 +206,61 @@ def get_us_price(symbol: str, exchange: str = "NAS") -> dict:
     }
 
 
+_fx_cache: dict = {"rate": None, "at": 0.0}
+_FX_CACHE_SEC = 120
+
+
+def get_usd_krw_rate() -> float | None:
+    """원/달러 환율 (매매·환전 참고용). 실패 시 None. 2분 캐시."""
+    now = time.time()
+    cached = _fx_cache.get("rate")
+    if cached and (now - float(_fx_cache.get("at") or 0)) < _FX_CACHE_SEC:
+        return float(cached)
+
+    today = datetime.now(KST).strftime("%Y%m%d")
+    start = (datetime.now(KST) - timedelta(days=7)).strftime("%Y%m%d")
+    try:
+        data = _get(
+            "/uapi/overseas-price/v1/quotations/inquire-daily-chartprice",
+            "FHKST03030100",
+            {
+                "FID_COND_MRKT_DIV_CODE": "X",
+                "FID_INPUT_ISCD": "FX@KRWKFTC",
+                "FID_INPUT_DATE_1": start,
+                "FID_INPUT_DATE_2": today,
+                "FID_PERIOD_DIV_CODE": "D",
+            },
+            kind="market",
+        )
+        rows = data.get("output2") or []
+        if isinstance(rows, dict):
+            rows = [rows]
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            for key in ("ovrs_nmix_prpr", "clos", "close", "last", "stck_clpr", "prpr"):
+                raw = row.get(key)
+                if raw not in (None, ""):
+                    rate = float(raw)
+                    if rate > 100:
+                        _fx_cache["rate"] = rate
+                        _fx_cache["at"] = now
+                        return rate
+        out1 = data.get("output1")
+        if isinstance(out1, dict):
+            for key in ("ovrs_nmix_prpr", "last", "clos"):
+                raw = out1.get(key)
+                if raw not in (None, ""):
+                    rate = float(raw)
+                    if rate > 100:
+                        _fx_cache["rate"] = rate
+                        _fx_cache["at"] = now
+                        return rate
+    except Exception as e:
+        print(f"[환율] FX@KRWKFTC 조회 실패: {e}")
+    return None
+
+
 def get_us_daily_prices(symbol: str, exchange: str = "NAS", days: int = 100) -> list[dict]:
     """해외주식 일별 시세 (최신 순)."""
     data = _get(

@@ -6,8 +6,9 @@
   2) ORB — 개장 N분 레인지 고가 돌파 + RVOL + VWAP 위
   3) S·RVOL — 일봉 모멘텀 + 시간보정 RVOL + VWAP 위
 
-청산: -2% 손절 / +5% 익절 (하드) / 정규장 종료 강제청산
+청산: -2% 손절 / +6% 익절 (하드, 왕복수수료~0.5% 반영) / 정규장 종료 강제청산
 보유 포지션은 진입 스캔과 별도로 더 자주 점검 가능 (US_EXIT_POLL_SEC).
+매수 시 원/달러 환율 기록 → 매도 알림에서 환전 보류 여부 안내.
 
 방식 A: 같은 점검에서 조건 통과 종목 중 신호점수 순으로
 세션 실주문(US_LIVE_MAX_POSITIONS, 기본 3회). 나머지는 병렬 시뮬 (US_PARALLEL_SIM).
@@ -35,7 +36,10 @@ MAX_TOTAL_USD = float(os.getenv("US_MAX_TOTAL_USD", "1500"))
 # 세션당 실전 진입 최대 횟수 (손절 후 재진입 포함). 동시 보유는 총한도≈2종
 LIVE_MAX_POSITIONS = int(os.getenv("US_LIVE_MAX_POSITIONS", "3"))
 STOP_LOSS_PCT = float(os.getenv("US_SIM_STOP_LOSS_PCT", "2.0"))
-TAKE_PROFIT_PCT = float(os.getenv("US_SIM_TAKE_PROFIT_PCT", "5.0"))
+# 왕복 수수료 ~0.5%(매수·매도 각 0.25%) 반영 → 기본 익절 +6%
+TAKE_PROFIT_PCT = float(os.getenv("US_SIM_TAKE_PROFIT_PCT", "6.0"))
+# 편도 수수료 %(매수·매도 각각). 순손익 표시·알림용
+FEE_ONE_WAY_PCT = float(os.getenv("US_FEE_ONE_WAY_PCT", "0.25"))
 MIN_DAY_PCT = float(os.getenv("US_SIM_MIN_DAY_PCT", "3.0"))
 MIN_RVOL = float(os.getenv("US_SIM_MIN_RVOL", os.getenv("US_SIM_MIN_VOL_RATIO", "2.5")))
 VOL_AVG_DAYS = int(os.getenv("US_SIM_VOL_AVG_DAYS", "20"))
@@ -518,6 +522,44 @@ def _qty(price: float, *, live: bool) -> int:
     return max(int(budget // price), 1)
 
 
+def _fee_round_trip_pct() -> float:
+    return FEE_ONE_WAY_PCT * 2.0
+
+
+def net_pct_after_fees(gross_pct: float) -> float:
+    """주식 수익률에서 왕복 수수료를 뺀 순수익률(대략)."""
+    return round(gross_pct - _fee_round_trip_pct(), 2)
+
+
+def fx_hold_advice(buy_fx: float | None, sell_fx: float | None) -> str:
+    """매수·매도 시점 환율 비교 → 원화 환전 보류 안내."""
+    if not buy_fx or buy_fx <= 0 or not sell_fx or sell_fx <= 0:
+        return (
+            "💱 환율 미확인 — 매도 대금은 달러로 두고, "
+            "매수 때보다 환율 낮으면 원화환전 보류"
+        )
+    diff_pct = (sell_fx - buy_fx) / buy_fx * 100
+    if sell_fx < buy_fx:
+        return (
+            f"💱 매수환율 {buy_fx:,.1f} → 현재 {sell_fx:,.1f} "
+            f"({diff_pct:+.2f}%)\n"
+            f"⚠️ 매수 때보다 환율 낮음 → <b>원화 환전 보류, 달러 보유</b> "
+            f"(다음 매수에 재사용)"
+        )
+    if sell_fx > buy_fx * 1.001:
+        return (
+            f"💱 매수환율 {buy_fx:,.1f} → 현재 {sell_fx:,.1f} "
+            f"({diff_pct:+.2f}%)\n"
+            f"✅ 환율 유리 — 원화 필요 시 환전 검토 가능 "
+            f"(다음 매매 예정이면 달러 유지 권장)"
+        )
+    return (
+        f"💱 매수환율 {buy_fx:,.1f} → 현재 {sell_fx:,.1f} "
+        f"({diff_pct:+.2f}%)\n"
+        f"💵 환율 비슷 — <b>달러 유지</b> 권장 (환전·재환전 비용 절약)"
+    )
+
+
 def _evaluate_exit(pos: dict, price: float) -> tuple[bool, str]:
     buy = float(pos["buy_price"])
     pct = (price - buy) / buy * 100 if buy > 0 else 0
@@ -532,6 +574,16 @@ def _make_sell_event(pos: dict, price: float, reason: str) -> dict:
     buy = float(pos["buy_price"])
     qty = int(pos["quantity"])
     pct = (price - buy) / buy * 100 if buy > 0 else 0
+    buy_fx = pos.get("buy_fx")
+    try:
+        buy_fx_f = float(buy_fx) if buy_fx else None
+    except (TypeError, ValueError):
+        buy_fx_f = None
+    sell_fx = None
+    try:
+        sell_fx = kis_us_api.get_usd_krw_rate()
+    except Exception as e:
+        print(f"[환율] 매도 시 조회 실패: {e}")
     return {
         "action": "sell",
         "symbol": pos["symbol"],
@@ -540,6 +592,10 @@ def _make_sell_event(pos: dict, price: float, reason: str) -> dict:
         "buy_price": buy,
         "sell_price": price,
         "profit_pct": round(pct, 2),
+        "net_pct": net_pct_after_fees(pct),
+        "buy_fx": buy_fx_f,
+        "sell_fx": sell_fx,
+        "fx_advice": fx_hold_advice(buy_fx_f, sell_fx),
         "sell_reason": reason,
         "strategy": pos.get("strategy", ""),
         "is_live": bool(pos.get("is_live")),
@@ -643,6 +699,11 @@ def _open_position(
     paper: bool,
 ) -> dict:
     qty = _qty(price, live=live)
+    buy_fx = None
+    try:
+        buy_fx = kis_us_api.get_usd_krw_rate()
+    except Exception as e:
+        print(f"[환율] 매수 시 조회 실패: {e}")
     pos = {
         "symbol": symbol,
         "exchange": exchange,
@@ -653,6 +714,7 @@ def _open_position(
         "strategy": strategy,
         "is_live": live,
         "paper": paper,
+        "buy_fx": buy_fx,
     }
     _bought_symbols_today.add(symbol)
     return pos
@@ -811,6 +873,7 @@ def run_check() -> list[dict]:
                 "score": score,
                 "is_live": want_live,
                 "paper": False,
+                "buy_fx": pos.get("buy_fx"),
             })
             continue
 
@@ -849,6 +912,7 @@ def run_check() -> list[dict]:
             "score": score,
             "is_live": want_live,
             "paper": True,
+            "buy_fx": pos.get("buy_fx"),
         })
 
     return events
@@ -944,6 +1008,7 @@ def format_summary() -> list[str]:
     if REQUIRE_ABOVE_VWAP:
         rules.append("VWAP↑")
     rules.append(f"익절+{TAKE_PROFIT_PCT:g}%/손절-{STOP_LOSS_PCT:g}%")
+    rules.append(f"수수료편도{FEE_ONE_WAY_PCT:g}%")
     if LIVE_ORDERS:
         rem = live_slots_remaining()
         rules.append(f"실전{rem}/{LIVE_MAX_POSITIONS}슬롯")

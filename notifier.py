@@ -50,11 +50,41 @@ def notify_error(msg: str) -> None:
     send(f"⚠️ <b>[US봇 오류]</b>\n{msg}")
 
 
-def notify_sim_buy(symbol: str, exchange: str, qty: int, price: float, reason: str) -> None:
+def _fx_buy_line(buy_fx: float | None) -> str:
+    if buy_fx and buy_fx > 0:
+        return f"💱 매수환율 기록: {buy_fx:,.1f} 원/달러\n"
+    return "💱 매수환율: 미확인 (앱에서 수동 메모 권장)\n"
+
+
+def _sell_extra_lines(
+    *,
+    gross_pct: float,
+    net_pct: float | None,
+    fx_advice: str | None,
+) -> str:
+    lines: list[str] = []
+    if net_pct is not None:
+        fee = abs(gross_pct - net_pct)
+        sign = "+" if net_pct >= 0 else ""
+        lines.append(f"수수료 반영 순손익 ≈ {sign}{net_pct:.2f}% (왕복≈{fee:.2f}%p)")
+    if fx_advice:
+        lines.append(fx_advice)
+    return ("\n".join(lines) + "\n") if lines else ""
+
+
+def notify_sim_buy(
+    symbol: str,
+    exchange: str,
+    qty: int,
+    price: float,
+    reason: str,
+    buy_fx: float | None = None,
+) -> None:
     send(
         f"🇺🇸🟢 <b>[US 시뮬] 매수</b>\n"
         f"{symbol} ({exchange})\n"
         f"{qty}주 @ ${price:.2f}\n"
+        f"{_fx_buy_line(buy_fx)}"
         f"{reason}\n"
         f"⚠️ 시뮬만 — 실제 주문 없음"
     )
@@ -68,6 +98,9 @@ def notify_sim_sell(
     sell: float,
     pct: float,
     reason: str,
+    *,
+    net_pct: float | None = None,
+    fx_advice: str | None = None,
 ) -> None:
     emoji = "📈" if pct >= 0 else "📉"
     sign = "+" if pct >= 0 else ""
@@ -76,6 +109,7 @@ def notify_sim_sell(
         f"{symbol} ({exchange})\n"
         f"{qty}주 ${buy:.2f} → ${sell:.2f}\n"
         f"{sign}{pct:.2f}%\n"
+        f"{_sell_extra_lines(gross_pct=pct, net_pct=net_pct, fx_advice=fx_advice)}"
         f"{reason}\n"
         f"⚠️ 시뮬만 — 실제 주문 없음"
     )
@@ -93,11 +127,19 @@ def notify_skip_digest(lines: list[str]) -> bool:
     )
 
 
-def notify_live_buy(symbol: str, exchange: str, qty: int, price: float, reason: str) -> None:
+def notify_live_buy(
+    symbol: str,
+    exchange: str,
+    qty: int,
+    price: float,
+    reason: str,
+    buy_fx: float | None = None,
+) -> None:
     send(
         f"🇺🇸🔴 <b>[US 실전] 매수</b>\n"
         f"{symbol} ({exchange})\n"
         f"{qty}주 @ ${price:.2f}\n"
+        f"{_fx_buy_line(buy_fx)}"
         f"{reason}\n"
         f"⚠️ 실주문 — 방식A 점수순 "
         f"(세션 최대 {os.getenv('US_LIVE_MAX_POSITIONS', '3')}종)"
@@ -112,6 +154,9 @@ def notify_live_sell(
     sell: float,
     pct: float,
     reason: str,
+    *,
+    net_pct: float | None = None,
+    fx_advice: str | None = None,
 ) -> None:
     emoji = "📈" if pct >= 0 else "📉"
     sign = "+" if pct >= 0 else ""
@@ -120,6 +165,7 @@ def notify_live_sell(
         f"{symbol} ({exchange})\n"
         f"{qty}주 ${buy:.2f} → ${sell:.2f}\n"
         f"{sign}{pct:.2f}%\n"
+        f"{_sell_extra_lines(gross_pct=pct, net_pct=net_pct, fx_advice=fx_advice)}"
         f"{reason}\n"
-        f"⚠️ 실주문 청산"
+        f"⚠️ 실주문 청산 — 달러 예수금 확인 후 환전 여부 결정"
     )

@@ -293,6 +293,11 @@ def _dispatch_events(events: list[dict]) -> None:
     for ev in events:
         if ev.get("action") == "buy":
             is_live = bool(ev.get("is_live"))
+            buy_fx = ev.get("buy_fx")
+            try:
+                buy_fx = float(buy_fx) if buy_fx else None
+            except (TypeError, ValueError):
+                buy_fx = None
             if is_live and us_screener.is_etp(ev["symbol"], ev.get("name") or ""):
                 # 스크리너 누락 시 실주문 시도 전에 차단
                 us_screener.mark_etp(ev["symbol"])
@@ -308,7 +313,7 @@ def _dispatch_events(events: list[dict]) -> None:
                     us_sim.mark_live_used()
                     notifier.notify_live_buy(
                         ev["symbol"], ev["exchange"], ev["quantity"],
-                        ev["price"], ev["reason"],
+                        ev["price"], ev["reason"], buy_fx=buy_fx,
                     )
                 except Exception as e:
                     print(f"[실전매수 실패→시뮬] {e}")
@@ -320,15 +325,23 @@ def _dispatch_events(events: list[dict]) -> None:
                     notifier.notify_sim_buy(
                         ev["symbol"], ev["exchange"], ev["quantity"],
                         ev["price"], ev["reason"] + " (실주문실패→시뮬)",
+                        buy_fx=buy_fx,
                     )
             else:
                 notifier.notify_sim_buy(
                     ev["symbol"], ev["exchange"], ev["quantity"],
                     ev["price"],
                     ev["reason"] + (" (ETP→시뮬)" if us_screener.is_etp(ev["symbol"]) else ""),
+                    buy_fx=buy_fx,
                 )
         elif ev.get("action") == "sell":
             is_live = bool(ev.get("is_live"))
+            net_pct = ev.get("net_pct")
+            try:
+                net_pct = float(net_pct) if net_pct is not None else None
+            except (TypeError, ValueError):
+                net_pct = None
+            fx_advice = ev.get("fx_advice") or None
             if is_live:
                 try:
                     order_px = _limit_sell_price(float(ev["sell_price"]))
@@ -339,6 +352,7 @@ def _dispatch_events(events: list[dict]) -> None:
                         ev["symbol"], ev["exchange"], ev["quantity"],
                         ev["buy_price"], ev["sell_price"],
                         ev["profit_pct"], ev["sell_reason"],
+                        net_pct=net_pct, fx_advice=fx_advice,
                     )
                 except Exception as e:
                     print(f"[실전매도 실패] {e}")
@@ -347,12 +361,14 @@ def _dispatch_events(events: list[dict]) -> None:
                         ev["symbol"], ev["exchange"], ev["quantity"],
                         ev["buy_price"], ev["sell_price"],
                         ev["profit_pct"], ev["sell_reason"] + f" (실주문실패:{e})",
+                        net_pct=net_pct, fx_advice=fx_advice,
                     )
             else:
                 notifier.notify_sim_sell(
                     ev["symbol"], ev["exchange"], ev["quantity"],
                     ev["buy_price"], ev["sell_price"],
                     ev["profit_pct"], ev["sell_reason"],
+                    net_pct=net_pct, fx_advice=fx_advice,
                 )
     if events:
         _save_state()
@@ -480,6 +496,18 @@ def _maybe_closing_report_backup() -> None:
     _session_end_close()
 
 
+def _sell_notify_kwargs(trade: dict) -> dict:
+    net = trade.get("net_pct")
+    try:
+        net = float(net) if net is not None else None
+    except (TypeError, ValueError):
+        net = None
+    return {
+        "net_pct": net,
+        "fx_advice": trade.get("fx_advice") or None,
+    }
+
+
 def _session_end_close() -> None:
     def _px(symbol: str, exchange: str) -> float:
         try:
@@ -495,6 +523,7 @@ def _session_end_close() -> None:
             was_live = bool(pos.get("is_live"))
             trade = us_sim.force_close(price, "정규장 종료 청산")
             if trade:
+                skw = _sell_notify_kwargs(trade)
                 if was_live:
                     try:
                         order_px = _limit_sell_price(float(trade["sell_price"]))
@@ -505,6 +534,7 @@ def _session_end_close() -> None:
                             trade["symbol"], trade["exchange"], trade["quantity"],
                             trade["buy_price"], trade["sell_price"],
                             trade["profit_pct"], trade["sell_reason"],
+                            **skw,
                         )
                     except Exception as e:
                         notifier.notify_error(f"정규장종료 실전매도 실패: {e}")
@@ -512,12 +542,14 @@ def _session_end_close() -> None:
                             trade["symbol"], trade["exchange"], trade["quantity"],
                             trade["buy_price"], trade["sell_price"],
                             trade["profit_pct"], trade["sell_reason"] + f" (실주문실패:{e})",
+                            **skw,
                         )
                 else:
                     notifier.notify_sim_sell(
                         trade["symbol"], trade["exchange"], trade["quantity"],
                         trade["buy_price"], trade["sell_price"],
                         trade["profit_pct"], trade["sell_reason"],
+                        **skw,
                     )
 
         for sym, ppos in list(us_sim.get_paper_positions().items()):
@@ -528,6 +560,7 @@ def _session_end_close() -> None:
                     trade["symbol"], trade["exchange"], trade["quantity"],
                     trade["buy_price"], trade["sell_price"],
                     trade["profit_pct"], trade["sell_reason"],
+                    **_sell_notify_kwargs(trade),
                 )
 
         digest = us_sim.consume_skip_digest()
@@ -569,7 +602,9 @@ def main() -> None:
         f"ORB={'ON' if us_sim.ENABLE_ORB else 'OFF'}({us_sim.ORB_MINUTES}m) / "
         f"S={'ON' if us_sim.ENABLE_S else 'OFF'} / "
         f"VWAP↑={'ON' if us_sim.REQUIRE_ABOVE_VWAP else 'OFF'}\n"
-        f"청산: 익절 +{us_sim.TAKE_PROFIT_PCT:g}% / 손절 -{us_sim.STOP_LOSS_PCT:g}%\n"
+        f"청산: 익절 +{us_sim.TAKE_PROFIT_PCT:g}% / 손절 -{us_sim.STOP_LOSS_PCT:g}% "
+        f"(수수료 편도 {us_sim.FEE_ONE_WAY_PCT:g}% · 왕복≈{us_sim.FEE_ONE_WAY_PCT * 2:g}%p)\n"
+        f"환전: 매수 환율 기록 → 매도 시 비교 · 환율 낮으면 달러 보유 안내\n"
         f"시뮬: {'ON' if us_sim.is_enabled() else 'OFF'} "
         f"(${us_sim.SIM_AMOUNT_USD:g}) / "
         f"실전: {'ON 방식A 점수순 최대 ' + str(us_sim.LIVE_MAX_POSITIONS) + '종' if LIVE_ORDERS else 'OFF'} "
