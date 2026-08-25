@@ -604,7 +604,7 @@ def main() -> None:
         f"VWAP↑={'ON' if us_sim.REQUIRE_ABOVE_VWAP else 'OFF'}\n"
         f"청산: 익절 +{us_sim.TAKE_PROFIT_PCT:g}% / 손절 -{us_sim.STOP_LOSS_PCT:g}% "
         f"(수수료 편도 {us_sim.FEE_ONE_WAY_PCT:g}% · 왕복≈{us_sim.FEE_ONE_WAY_PCT * 2:g}%p)\n"
-        f"환전: 매수 환율 기록 → 매도 시 비교 · 환율 낮으면 달러 보유 안내\n"
+        f"환전: 매도 시 환율 비교 안내 · <b>환전은 원할 때만 수동</b> (자동환전 없음)\n"
         f"시뮬: {'ON' if us_sim.is_enabled() else 'OFF'} "
         f"(${us_sim.SIM_AMOUNT_USD:g}) / "
         f"실전: {'ON 방식A 점수순 최대 ' + str(us_sim.LIVE_MAX_POSITIONS) + '종' if LIVE_ORDERS else 'OFF'} "

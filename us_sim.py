@@ -8,7 +8,7 @@
 
 청산: -2% 손절 / +6% 익절 (하드, 왕복수수료~0.5% 반영) / 정규장 종료 강제청산
 보유 포지션은 진입 스캔과 별도로 더 자주 점검 가능 (US_EXIT_POLL_SEC).
-매수 시 원/달러 환율 기록 → 매도 알림에서 환전 보류 여부 안내.
+매수 시 원/달러 환율 기록 → 매도 알림에서 환전 검토/보류 안내 (환전은 항상 수동).
 
 방식 A: 같은 점검에서 조건 통과 종목 중 신호점수 순으로
 세션 실주문(US_LIVE_MAX_POSITIONS, 기본 3회). 나머지는 병렬 시뮬 (US_PARALLEL_SIM).
@@ -532,31 +532,35 @@ def net_pct_after_fees(gross_pct: float) -> float:
 
 
 def fx_hold_advice(buy_fx: float | None, sell_fx: float | None) -> str:
-    """매수·매도 시점 환율 비교 → 원화 환전 보류 안내."""
+    """매수·매도 시점 환율 비교 → 안내만 (환전은 항상 수동)."""
+    manual = "실제 환전은 앱에서 원할 때만 수동"
     if not buy_fx or buy_fx <= 0 or not sell_fx or sell_fx <= 0:
         return (
-            "💱 환율 미확인 — 매도 대금은 달러로 두고, "
-            "매수 때보다 환율 낮으면 원화환전 보류"
+            f"💱 환율 미확인\n"
+            f"💵 기본: 달러 보유 · {manual}"
         )
     diff_pct = (sell_fx - buy_fx) / buy_fx * 100
     if sell_fx < buy_fx:
         return (
             f"💱 매수환율 {buy_fx:,.1f} → 현재 {sell_fx:,.1f} "
             f"({diff_pct:+.2f}%)\n"
-            f"⚠️ 매수 때보다 환율 낮음 → <b>원화 환전 보류, 달러 보유</b> "
-            f"(다음 매수에 재사용)"
+            f"⚠️ 매수 때보다 환율 낮음 → <b>달러 보유 권장</b> "
+            f"(환전 보류)\n"
+            f"({manual})"
         )
     if sell_fx > buy_fx * 1.001:
         return (
             f"💱 매수환율 {buy_fx:,.1f} → 현재 {sell_fx:,.1f} "
             f"({diff_pct:+.2f}%)\n"
-            f"✅ 환율 유리 — 원화 필요 시 환전 검토 가능 "
-            f"(다음 매매 예정이면 달러 유지 권장)"
+            f"✅ <b>환전 검토 가능</b> "
+            f"(원화가 필요할 때만 · 다음 매매면 달러 유지)\n"
+            f"({manual})"
         )
     return (
         f"💱 매수환율 {buy_fx:,.1f} → 현재 {sell_fx:,.1f} "
         f"({diff_pct:+.2f}%)\n"
-        f"💵 환율 비슷 — <b>달러 유지</b> 권장 (환전·재환전 비용 절약)"
+        f"💵 환율 비슷 → <b>달러 유지</b> 권장\n"
+        f"({manual})"
     )
 
 

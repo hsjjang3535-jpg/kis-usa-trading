@@ -167,5 +167,5 @@ def notify_live_sell(
         f"{sign}{pct:.2f}%\n"
         f"{_sell_extra_lines(gross_pct=pct, net_pct=net_pct, fx_advice=fx_advice)}"
         f"{reason}\n"
-        f"⚠️ 실주문 청산 — 달러 예수금 확인 후 환전 여부 결정"
+        f"⚠️ 실주문 청산 — 환전은 원할 때만 앱에서 수동"
     )
