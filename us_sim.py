@@ -11,8 +11,8 @@
 매수 시 원/달러 환율 기록 → 매도 알림에서 환전 검토/보류 안내 (환전은 항상 수동).
 
 방식 A: 같은 점검에서 조건 통과 종목 중 신호점수 순으로
-세션 실주문(US_LIVE_MAX_POSITIONS, 기본 3회). 나머지는 병렬 시뮬 (US_PARALLEL_SIM).
-동시 실전 보유는 US_MAX_TOTAL_USD(기본 $1500)로 약 2종.
+세션 실주문(US_LIVE_MAX_POSITIONS). 장초 워밍업·점검당 1건·최소점수·S차단으로
+초반 슬롯 소진을 줄이고 점수 좋은 신호만 실전. 나머지는 병렬 시뮬.
 """
 from __future__ import annotations
 
@@ -35,6 +35,14 @@ LIVE_AMOUNT_USD = float(os.getenv("US_LIVE_AMOUNT_USD", os.getenv("US_SIM_AMOUNT
 MAX_TOTAL_USD = float(os.getenv("US_MAX_TOTAL_USD", "1500"))
 # 세션당 실전 진입 최대 횟수 (손절 후 재진입 포함). 동시 보유는 총한도≈2종
 LIVE_MAX_POSITIONS = int(os.getenv("US_LIVE_MAX_POSITIONS", "3"))
+# 장 초반 실전 소진 방지: 개장 후 N분 동안은 시뮬만
+LIVE_WARMUP_MIN = float(os.getenv("US_LIVE_WARMUP_MIN", "25"))
+# 한 번의 점검(폴링)에서 실전 최대 건수 — 점수 1등만 실전, 나머지는 시뮬
+LIVE_MAX_PER_CHECK = int(os.getenv("US_LIVE_MAX_PER_CHECK", "1"))
+# 이 점수 미만은 실전 안 씀 (GapGo≈300+, 강한 ORB≈200+)
+LIVE_MIN_SCORE = float(os.getenv("US_LIVE_MIN_SCORE", "250"))
+# S·RVOL은 장중 후순위 — 실전 슬롯 아끼려면 true
+LIVE_BLOCK_S = os.getenv("US_LIVE_BLOCK_S", "true").lower() == "true"
 STOP_LOSS_PCT = float(os.getenv("US_SIM_STOP_LOSS_PCT", "2.0"))
 # 왕복 수수료 ~0.5%(매수·매도 각 0.25%) 반영 → 기본 익절 +6%
 TAKE_PROFIT_PCT = float(os.getenv("US_SIM_TAKE_PROFIT_PCT", "6.0"))
@@ -185,6 +193,31 @@ def _want_live_for_price(price: float) -> bool:
     return _live_budget_remaining() >= price
 
 
+def _decide_live(
+    *,
+    strategy: str,
+    score: float,
+    price: float,
+    symbol: str,
+    live_used_this_check: int,
+) -> tuple[bool, str]:
+    """실전 배정 여부. (want_live, 보류사유|빈문자)."""
+    if us_screener.is_etp(symbol):
+        return False, "ETP→시뮬"
+    if not _want_live_for_price(price):
+        return False, "실전슬롯/한도없음"
+    mins = market_hours.minutes_since_open()
+    if mins < LIVE_WARMUP_MIN:
+        return False, f"워밍업{mins:.0f}/{LIVE_WARMUP_MIN:g}분"
+    if LIVE_BLOCK_S and strategy == "S":
+        return False, "S는시뮬만"
+    if score < LIVE_MIN_SCORE:
+        return False, f"점수{score:.0f}<{LIVE_MIN_SCORE:g}"
+    if live_used_this_check >= LIVE_MAX_PER_CHECK:
+        return False, f"점검당실전{LIVE_MAX_PER_CHECK}한도"
+    return True, ""
+
+
 def mark_live_used() -> None:
     global _live_entries_today
     _live_entries_today += 1
@@ -254,6 +287,105 @@ def compute_pnl_summary() -> dict:
         }
 
     return {"live": _bucket(live_trades), "sim": _bucket(sim_trades)}
+
+
+def _norm_strategy(raw: str | None) -> str:
+    s = (raw or "").strip()
+    if s in ("GapGo", "Gap&Go", "Gap and Go"):
+        return "GapGo"
+    if s.upper() == "ORB" or s.startswith("ORB"):
+        return "ORB"
+    if s in ("S", "S·RVOL", "SRVOL") or s.startswith("S"):
+        return "S"
+    return s or "?"
+
+
+def compute_strategy_summary() -> list[dict]:
+    """전략별 건수·승패·승률·손익 (실전+시뮬 합산, 실전만 별도)."""
+    order = ("GapGo", "ORB", "S")
+    buckets: dict[str, dict] = {
+        k: {
+            "strategy": k,
+            "count": 0,
+            "wins": 0,
+            "losses": 0,
+            "pnl_usd": 0.0,
+            "live_count": 0,
+            "live_wins": 0,
+            "live_pnl": 0.0,
+        }
+        for k in order
+    }
+    for t in _trades_today:
+        key = _norm_strategy(t.get("strategy"))
+        if key not in buckets:
+            buckets[key] = {
+                "strategy": key,
+                "count": 0,
+                "wins": 0,
+                "losses": 0,
+                "pnl_usd": 0.0,
+                "live_count": 0,
+                "live_wins": 0,
+                "live_pnl": 0.0,
+            }
+        b = buckets[key]
+        pnl = _trade_pnl_usd(t)
+        b["count"] += 1
+        b["pnl_usd"] += pnl
+        if pnl > 0:
+            b["wins"] += 1
+        else:
+            b["losses"] += 1
+        if t.get("is_live"):
+            b["live_count"] += 1
+            b["live_pnl"] += pnl
+            if pnl > 0:
+                b["live_wins"] += 1
+
+    out: list[dict] = []
+    for k in order:
+        b = buckets[k]
+        if b["count"] == 0:
+            continue
+        b["pnl_usd"] = round(b["pnl_usd"], 2)
+        b["live_pnl"] = round(b["live_pnl"], 2)
+        b["win_rate"] = round(b["wins"] / b["count"] * 100, 0) if b["count"] else 0.0
+        out.append(b)
+    for k, b in buckets.items():
+        if k in order or b["count"] == 0:
+            continue
+        b["pnl_usd"] = round(b["pnl_usd"], 2)
+        b["live_pnl"] = round(b["live_pnl"], 2)
+        b["win_rate"] = round(b["wins"] / b["count"] * 100, 0) if b["count"] else 0.0
+        out.append(b)
+    return out
+
+
+def format_strategy_report_lines() -> list[str]:
+    rows = compute_strategy_summary()
+    if not rows:
+        return []
+    lines = ["📈 <b>전략별</b> (전체 / 실전)"]
+    for b in rows:
+        wr = int(b["win_rate"])
+        live_n = b["live_count"]
+        if live_n:
+            live_w = b["live_wins"]
+            live_bit = (
+                f" · 실전 {live_n}건 승{live_w} "
+                f"${b['live_pnl']:+,.2f}"
+            )
+        else:
+            live_bit = " · 실전 0"
+        lines.append(
+            f"  · {b['strategy']}: {b['count']}건 "
+            f"승{b['wins']}/패{b['losses']} ({wr}%) "
+            f"${b['pnl_usd']:+,.2f}{live_bit}"
+        )
+    if LIVE_BLOCK_S:
+        lines.append("  · S→실전차단(시뮬만)")
+    return lines
 
 
 def get_latest_skip_lines(max_items: int = 8) -> list[str]:
@@ -845,6 +977,7 @@ def run_check() -> list[dict]:
 
     candidates.sort(key=lambda c: c["score"], reverse=True)
 
+    live_used_this_check = 0
     for c in candidates:
         symbol = c["symbol"]
         exchange = c["exchange"]
@@ -853,9 +986,18 @@ def run_check() -> list[dict]:
         score = c["score"]
         reason = f"{c['reason']} · 점수{score:.0f}"
 
-        # 점수 최고(남은 후보 중) → 주포지션. 실전 슬롯 있으면 실주문.
+        want_live, live_hold = _decide_live(
+            strategy=strategy,
+            score=score,
+            price=price,
+            symbol=symbol,
+            live_used_this_check=live_used_this_check,
+        )
+        if not want_live and live_hold:
+            reason = f"{reason} · 실전보류:{live_hold}"
+
+        # 점수 최고(남은 후보 중) → 주포지션. 실전은 선별 통과 시에만.
         if primary_free:
-            want_live = _want_live_for_price(price) and not us_screener.is_etp(symbol)
             pos = _open_position(
                 symbol=symbol, exchange=exchange, price=price,
                 reason=reason, strategy=strategy, live=want_live, paper=False,
@@ -866,6 +1008,8 @@ def run_check() -> list[dict]:
             _open = pos
             primary_free = False
             held.add(symbol)
+            if want_live:
+                live_used_this_check += 1
             events.append({
                 "action": "buy",
                 "symbol": symbol,
@@ -881,12 +1025,12 @@ def run_check() -> list[dict]:
             })
             continue
 
-        # 주포지션 이미 있음 → 병렬 (실전 슬롯 있으면 실전, 아니면 시뮬)
-        want_live = _want_live_for_price(price) and not us_screener.is_etp(symbol)
+        # 주포지션 이미 있음 → 병렬 (실전 선별 통과 시 실전, 아니면 시뮬)
         if not PARALLEL_SIM and not want_live:
             _record_skip(
                 symbol,
-                f"신호OK·점수{score:.0f}·주포지션보유({_open and _open.get('symbol')})",
+                f"신호OK·점수{score:.0f}·주포지션보유({_open and _open.get('symbol')})"
+                + (f"·{live_hold}" if live_hold else ""),
             )
             continue
         if not want_live and paper_slots <= 0:
@@ -904,6 +1048,8 @@ def run_check() -> list[dict]:
         _paper[symbol] = pos
         if not want_live:
             paper_slots -= 1
+        else:
+            live_used_this_check += 1
         held.add(symbol)
         events.append({
             "action": "buy",
@@ -949,6 +1095,11 @@ def format_session_report(*, closing: bool = False, ny_day: str | None = None) -
         f"({sim['count']}건 · 승 {sim['wins']})"
     )
     lines.append("")
+
+    strat_lines = format_strategy_report_lines()
+    if strat_lines:
+        lines.extend(strat_lines)
+        lines.append("")
 
     if _trades_today:
         lines.append(f"체결 {len(_trades_today)}건:")
@@ -1017,6 +1168,11 @@ def format_summary() -> list[str]:
         rem = live_slots_remaining()
         rules.append(f"실전{rem}/{LIVE_MAX_POSITIONS}슬롯")
         rules.append(f"실전총한도${MAX_TOTAL_USD:g}")
+        rules.append(f"워밍업{LIVE_WARMUP_MIN:g}분")
+        rules.append(f"점검당실전≤{LIVE_MAX_PER_CHECK}")
+        rules.append(f"실전점수≥{LIVE_MIN_SCORE:g}")
+        if LIVE_BLOCK_S:
+            rules.append("S→시뮬")
     if PARALLEL_SIM:
         rules.append(f"병렬시뮬≤{MAX_SIM_POSITIONS}")
     if rules:

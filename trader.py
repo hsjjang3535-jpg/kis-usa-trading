@@ -593,6 +593,14 @@ def main() -> None:
     _run_screen(force=True, notify=False)
     preview = us_screener.format_watchlist_preview(8)
     stats = us_screener.get_last_stats()
+    live_line = "OFF"
+    if LIVE_ORDERS:
+        live_line = (
+            f"ON 선별 최대 {us_sim.LIVE_MAX_POSITIONS}종 "
+            f"(워밍업{us_sim.LIVE_WARMUP_MIN:g}분·점검당{us_sim.LIVE_MAX_PER_CHECK}"
+            f"·점수≥{us_sim.LIVE_MIN_SCORE:g}"
+            f"{'·S시뮬' if us_sim.LIVE_BLOCK_S else ''})"
+        )
     notifier.send(
         f"🇺🇸 <b>미국주식 봇 시작</b> — {market_hours.now_kst().strftime('%Y-%m-%d %H:%M')} KST\n"
         f"{acct_line}\n"
@@ -607,7 +615,7 @@ def main() -> None:
         f"환전: 매도 시 환율 비교 안내 · <b>환전은 원할 때만 수동</b> (자동환전 없음)\n"
         f"시뮬: {'ON' if us_sim.is_enabled() else 'OFF'} "
         f"(${us_sim.SIM_AMOUNT_USD:g}) / "
-        f"실전: {'ON 방식A 점수순 최대 ' + str(us_sim.LIVE_MAX_POSITIONS) + '종' if LIVE_ORDERS else 'OFF'} "
+        f"실전: {live_line} "
         f"(${us_sim.LIVE_AMOUNT_USD:g}/회 · 총한도 ${us_sim.MAX_TOTAL_USD:g})\n"
         f"병렬시뮬: {'ON' if us_sim.PARALLEL_SIM else 'OFF'} "
         f"(최대 {us_sim.MAX_SIM_POSITIONS}종) · "

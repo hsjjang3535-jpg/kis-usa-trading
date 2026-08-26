@@ -19,8 +19,12 @@
 | Variable | 기본값 | 설명 |
 |----------|--------|------|
 | `ENABLE_US_SIM` | `true` | 미국 시뮬 ON |
-| `ENABLE_US_LIVE_ORDERS` | `false` | 방식A: 같은 점검 점수순 실주문(세션 `US_LIVE_MAX_POSITIONS`종) |
+| `ENABLE_US_LIVE_ORDERS` | `false` | 실주문 ON. 선별 통과분만 실전 |
 | `US_LIVE_MAX_POSITIONS` | `3` | 세션당 실전 진입 최대 횟수. 동시 보유는 `US_MAX_TOTAL_USD`로 ≈2종 |
+| `US_LIVE_WARMUP_MIN` | `25` | 개장 후 N분 동안 실전 금지(시뮬만). 초반 슬롯 소진 방지 |
+| `US_LIVE_MAX_PER_CHECK` | `1` | 점검(폴링)당 실전 최대 건수. 점수 1등만 실전 |
+| `US_LIVE_MIN_SCORE` | `250` | 이 점수 미만은 시뮬만 (GapGo 위주) |
+| `US_LIVE_BLOCK_S` | `true` | S·RVOL은 실전 안 씀(시뮬만) |
 | `US_LIVE_AMOUNT_USD` | `750` (미설정 시 시뮬과 동일) | 실전 1회 매수 예산(USD, ≈100만원) |
 | `US_MAX_TOTAL_USD` | `1500` | 실전 총 투자 한도(USD, ≈200만원) |
 | `US_DYNAMIC_WATCHLIST` | `true` | 동적 스크리너 |
