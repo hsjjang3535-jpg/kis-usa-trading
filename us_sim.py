@@ -223,15 +223,53 @@ def mark_live_used() -> None:
     _live_entries_today += 1
 
 
+def confirm_live_fill(symbol: str, qty: int, avg_price: float) -> None:
+    """KIS 잔고 확인 후 실전 포지션 확정."""
+    global _open
+    sym = symbol.upper()
+    if _open and _open.get("symbol") == sym:
+        if qty > 0:
+            _open["quantity"] = int(qty)
+        if avg_price > 0:
+            _open["buy_price"] = float(avg_price)
+            _open["peak_price"] = float(avg_price)
+        _open["is_live"] = True
+        _open.pop("live_intent", None)
+        return
+    pos = _paper.get(sym)
+    if pos:
+        if qty > 0:
+            pos["quantity"] = int(qty)
+        if avg_price > 0:
+            pos["buy_price"] = float(avg_price)
+            pos["peak_price"] = float(avg_price)
+        pos["is_live"] = True
+        pos.pop("live_intent", None)
+
+
+def abort_live_entry(symbol: str) -> None:
+    """실전 매수 미체결/실패 — 내부 포지션 제거 (시뮬 전환 없음)."""
+    global _open
+    sym = symbol.upper()
+    if _open and _open.get("symbol") == sym and _open.get("live_intent"):
+        _open = None
+        return
+    if sym in _paper and _paper[sym].get("live_intent"):
+        del _paper[sym]
+
+
 def downgrade_live_to_sim(symbol: str) -> None:
     """실주문 실패 시 해당 포지션만 시뮬로 전환."""
     global _open
-    if _open and _open.get("symbol") == symbol:
+    sym = symbol.upper()
+    if _open and _open.get("symbol") == sym:
         _open["is_live"] = False
+        _open["live_intent"] = False
         return
-    pos = _paper.get(symbol)
+    pos = _paper.get(sym)
     if pos:
         pos["is_live"] = False
+        pos["live_intent"] = False
 
 
 def _live_exposed() -> float:
@@ -739,23 +777,50 @@ def _make_sell_event(pos: dict, price: float, reason: str) -> dict:
     }
 
 
-def force_close(price: float, reason: str) -> dict | None:
+def commit_trade(trade: dict) -> None:
+    """실전 매도 체결 확인 후 손익 장부 반영."""
+    trade.pop("_pos_snapshot", None)
+    _trades_today.append(trade)
+
+
+def rollback_close(trade: dict) -> None:
+    """실전 매도 미체결 — 포지션 복원."""
+    global _open, _paper
+    snap = trade.pop("_pos_snapshot", None)
+    if not isinstance(snap, dict):
+        return
+    sym = snap.get("symbol", "")
+    if snap.get("paper"):
+        _paper[sym] = snap
+    else:
+        _open = snap
+
+
+def force_close(price: float, reason: str, *, record: bool = True) -> dict | None:
     global _open
     if not _open:
         return None
     trade = _make_sell_event(_open, price, reason)
-    _trades_today.append(trade)
+    snapshot = dict(_open)
     _open = None
+    if record:
+        _trades_today.append(trade)
+    else:
+        trade["_pos_snapshot"] = snapshot
     return trade
 
 
-def force_close_paper(symbol: str, price: float, reason: str) -> dict | None:
+def force_close_paper(symbol: str, price: float, reason: str, *, record: bool = True) -> dict | None:
     global _paper
     pos = _paper.pop(symbol, None)
     if not pos:
         return None
     trade = _make_sell_event(pos, price, reason)
-    _trades_today.append(trade)
+    if record:
+        _trades_today.append(trade)
+    else:
+        trade["_pos_snapshot"] = dict(pos)
+        trade["paper"] = True
     return trade
 
 
@@ -767,7 +832,8 @@ def force_close_all(price_fn) -> list[dict]:
             px = price_fn(_open["symbol"], _open["exchange"])
         except Exception:
             px = float(_open["buy_price"])
-        t = force_close(px, "정규장 종료 청산")
+        is_live = bool(_open.get("is_live"))
+        t = force_close(px, "정규장 종료 청산", record=not is_live)
         if t:
             events.append(t)
     for sym in list(_paper.keys()):
@@ -776,7 +842,8 @@ def force_close_all(price_fn) -> list[dict]:
             px = price_fn(sym, pos["exchange"])
         except Exception:
             px = float(pos["buy_price"])
-        t = force_close_paper(sym, px, "정규장 종료 청산")
+        is_live = bool(pos.get("is_live"))
+        t = force_close_paper(sym, px, "정규장 종료 청산", record=not is_live)
         if t:
             events.append(t)
     return events
@@ -848,7 +915,8 @@ def _open_position(
         "peak_price": price,
         "buy_reason": reason,
         "strategy": strategy,
-        "is_live": live,
+        "is_live": False,
+        "live_intent": bool(live),
         "paper": paper,
         "buy_fx": buy_fx,
     }
@@ -877,7 +945,8 @@ def run_exit_check() -> list[dict]:
                 _open["peak_price"] = price
             should, reason = _evaluate_exit(_open, price)
             if should:
-                t = force_close(price, reason)
+                is_live = bool(_open.get("is_live"))
+                t = force_close(price, reason, record=not is_live)
                 if t:
                     events.append(t)
 
@@ -895,7 +964,8 @@ def run_exit_check() -> list[dict]:
             pos["peak_price"] = price
         should, reason = _evaluate_exit(pos, price)
         if should:
-            t = force_close_paper(sym, price, reason)
+            is_live = bool(pos.get("is_live"))
+            t = force_close_paper(sym, price, reason, record=not is_live)
             if t:
                 events.append(t)
     return events

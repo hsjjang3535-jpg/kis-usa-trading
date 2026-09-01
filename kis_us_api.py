@@ -437,6 +437,128 @@ def sell_us_stock(
     return data
 
 
+def _balance_tr_id() -> str:
+    return "TTTS3012R" if MODE == "실전" else "VTTS3012R"
+
+
+def _parse_holdings_rows(rows: list) -> list[dict]:
+    out: list[dict] = []
+    for r in rows or []:
+        try:
+            sym = str(r.get("ovrs_pdno") or r.get("pdno") or "").strip().upper()
+            if not sym:
+                continue
+            qty = int(float(r.get("ovrs_cblc_qty") or r.get("hldg_qty") or 0))
+            avg = float(r.get("pchs_avg_pric") or r.get("avg_unpr") or 0)
+            excd = str(r.get("ovrs_excg_cd") or "").strip().upper()
+            out.append({
+                "symbol": sym,
+                "qty": qty,
+                "avg_price": avg,
+                "exchange_code": excd,
+            })
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def get_overseas_holdings(exchange: str, currency: str = "USD") -> list[dict]:
+    """해외주식 잔고 (거래소별)."""
+    cano, prod = get_account_parts()
+    data = _get(
+        "/uapi/overseas-stock/v1/trading/inquire-balance",
+        _balance_tr_id(),
+        {
+            "CANO": cano,
+            "ACNT_PRDT_CD": prod,
+            "OVRS_EXCG_CD": _ovrs_excg_cd(exchange),
+            "TR_CRCY_CD": currency,
+            "CTX_AREA_FK200": "",
+            "CTX_AREA_NK200": "",
+        },
+        kind="trade",
+    )
+    return _parse_holdings_rows(data.get("output1") or [])
+
+
+def get_holding_qty(symbol: str, exchange: str) -> int:
+    sym = symbol.upper()
+    for row in get_overseas_holdings(exchange):
+        if row["symbol"] == sym:
+            return int(row["qty"])
+    return 0
+
+
+def get_holding(symbol: str, exchange: str) -> dict | None:
+    sym = symbol.upper()
+    for row in get_overseas_holdings(exchange):
+        if row["symbol"] == sym:
+            return row
+    return None
+
+
+FILL_WAIT_SEC = float(os.getenv("US_FILL_WAIT_SEC", "45"))
+FILL_POLL_SEC = float(os.getenv("US_FILL_POLL_SEC", "3"))
+
+
+def wait_for_holding_increase(
+    symbol: str,
+    exchange: str,
+    before_qty: int,
+    min_delta: int = 1,
+    *,
+    timeout_sec: float | None = None,
+    poll_sec: float | None = None,
+) -> dict | None:
+    """매수 체결 대기 — 잔고 수량 증가 확인."""
+    timeout = FILL_WAIT_SEC if timeout_sec is None else timeout_sec
+    poll = FILL_POLL_SEC if poll_sec is None else poll_sec
+    sym = symbol.upper()
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        time.sleep(poll)
+        try:
+            row = get_holding(sym, exchange)
+            if not row:
+                continue
+            delta = int(row["qty"]) - int(before_qty)
+            if delta >= min_delta:
+                return {
+                    "qty": delta,
+                    "avg_price": float(row.get("avg_price") or 0),
+                    "total_qty": int(row["qty"]),
+                }
+        except Exception as e:
+            print(f"[체결대기] {sym} 매수 잔고조회 실패: {e}")
+    return None
+
+
+def wait_for_holding_decrease(
+    symbol: str,
+    exchange: str,
+    before_qty: int,
+    sell_qty: int,
+    *,
+    timeout_sec: float | None = None,
+    poll_sec: float | None = None,
+) -> bool:
+    """매도 체결 대기 — 잔고 수량 감소 확인."""
+    timeout = FILL_WAIT_SEC if timeout_sec is None else timeout_sec
+    poll = FILL_POLL_SEC if poll_sec is None else poll_sec
+    sym = symbol.upper()
+    target = max(int(before_qty) - int(sell_qty), 0)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        time.sleep(poll)
+        try:
+            after = get_holding_qty(sym, exchange)
+            if after <= target:
+                return True
+        except Exception as e:
+            print(f"[체결대기] {sym} 매도 잔고조회 실패: {e}")
+    return False
+
+
 def _parse_rank_rows(rows: list, *, name_keys: tuple[str, ...] = ("name", "knam", "ename", "enam")) -> list[dict]:
     parsed: list[dict] = []
     for r in rows or []:

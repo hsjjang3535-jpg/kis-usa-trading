@@ -25,6 +25,8 @@
 | `US_LIVE_MAX_PER_CHECK` | `1` | 점검(폴링)당 실전 최대 건수. 점수 1등만 실전 |
 | `US_LIVE_MIN_SCORE` | `250` | 이 점수 미만은 시뮬만 (GapGo 위주) |
 | `US_LIVE_BLOCK_S` | `true` | S·RVOL은 실전 안 씀(시뮬만) |
+| `US_FILL_WAIT_SEC` | `45` | 실전 주문 후 잔고 체결 확인 대기(초) |
+| `US_FILL_POLL_SEC` | `3` | 체결 확인 폴링 간격(초) |
 | `US_LIVE_AMOUNT_USD` | `750` (미설정 시 시뮬과 동일) | 실전 1회 매수 예산(USD, ≈100만원) |
 | `US_MAX_TOTAL_USD` | `1500` | 실전 총 투자 한도(USD, ≈200만원) |
 | `US_DYNAMIC_WATCHLIST` | `true` | 동적 스크리너 |
