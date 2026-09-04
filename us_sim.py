@@ -22,6 +22,7 @@ from zoneinfo import ZoneInfo
 
 import kis_us_api
 import market_hours
+import us_defense
 import us_screener
 
 KST = ZoneInfo("Asia/Seoul")
@@ -204,6 +205,9 @@ def _decide_live(
     """실전 배정 여부. (want_live, 보류사유|빈문자)."""
     if us_screener.is_etp(symbol):
         return False, "ETP→시뮬"
+    ok_def, def_reason = us_defense.allow_live(trades_today=_trades_today)
+    if not ok_def:
+        return False, f"방어:{def_reason}"
     if not _want_live_for_price(price):
         return False, "실전슬롯/한도없음"
     mins = market_hours.minutes_since_open()
@@ -1156,6 +1160,13 @@ def format_session_report(*, closing: bool = False, ny_day: str | None = None) -
 
     live = pnl["live"]
     sim = pnl["sim"]
+    if closing:
+        try:
+            us_defense.record_session_pnl(
+                ny_day, float(live["pnl_usd"]), int(live["count"]),
+            )
+        except Exception as e:
+            print(f"[US방어] 세션장부 기록 오류: {e}")
     lines.append(
         f"💰 <b>실전 손익: ${live['pnl_usd']:+,.2f}</b> "
         f"({live['count']}건 · 승 {live['wins']})"
@@ -1210,7 +1221,8 @@ def format_session_report(*, closing: bool = False, ny_day: str | None = None) -
         rem = live_slots_remaining()
         slot = f"{_live_entries_today}/{LIVE_MAX_POSITIONS} ({'가능' if rem else '소진'})"
         lines.append(f"실전슬롯: {slot} · 총한도 ${MAX_TOTAL_USD:g}")
-        lines.append("")
+    lines.append(us_defense.format_status_line())
+    lines.append("")
 
     skip_lines = get_latest_skip_lines()
     if skip_lines and (closing or not _trades_today):

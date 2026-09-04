@@ -23,6 +23,7 @@ import api_server
 import kis_us_api
 import market_hours
 import notifier
+import us_defense
 import us_screener
 import us_sim
 
@@ -160,6 +161,7 @@ def _save_state() -> None:
     state = {
         "date": _trading_day(),
         "us_sim": us_sim.dump_state(),
+        "us_defense": us_defense.dump_state(),
         "reports": {
             "mid_report": _last_ran.get("mid_report", ""),
             "closing_report": _last_ran.get("closing_report", ""),
@@ -180,6 +182,12 @@ def _load_state() -> None:
     try:
         state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
         us_sim.load_state(state.get("us_sim"))
+        us_defense.load_state(state.get("us_defense"))
+        if us_defense.dump_state().get("pause_until"):
+            print(
+                f"[상태 복원] US방어 pause→"
+                f"{us_defense.dump_state().get('pause_until')}"
+            )
         if isinstance(state.get("date"), str) and state["date"]:
             _last_ran["date"] = str(state["date"])
         reports = state.get("reports") if isinstance(state.get("reports"), dict) else {}
@@ -192,6 +200,16 @@ def _load_state() -> None:
             print(f"[상태 복원] US 시뮬 보유 {pos['symbol']}")
     except Exception as e:
         print(f"[상태 복원 오류] {e}")
+
+
+def _defense_after_live_trade() -> None:
+    try:
+        status = us_defense.refresh(trades_today=us_sim.get_trades_today())
+        us_defense.notify_if_triggered(notifier.send, status)
+        if status.get("changed"):
+            _save_state()
+    except Exception as e:
+        print(f"[US방어] 오류: {e}")
 
 
 def _reset_if_new_day() -> None:
@@ -303,6 +321,7 @@ def _execute_live_sell(ev: dict, skw: dict) -> bool:
         ev["profit_pct"], ev["sell_reason"],
         net_pct=skw.get("net_pct"), fx_advice=skw.get("fx_advice"),
     )
+    _defense_after_live_trade()
     return True
 
 
@@ -588,6 +607,14 @@ def _session_end_close() -> None:
 def main() -> None:
     print("=== KIS 미국주식 봇 시작 (국내 봇과 분리) ===")
     _load_state()
+    try:
+        status = us_defense.refresh(trades_today=us_sim.get_trades_today())
+        us_defense.notify_if_triggered(notifier.send, status)
+        if status.get("blocked"):
+            print(f"[US방어] 시작 시 활성: {status.get('reason')}")
+            _save_state()
+    except Exception as e:
+        print(f"[US방어] 시작 평가 오류: {e}")
     _maybe_closing_report_backup()
 
     api_thread = threading.Thread(target=api_server.start_api_server, daemon=True)
@@ -628,6 +655,7 @@ def main() -> None:
         f"(${us_sim.SIM_AMOUNT_USD:g}) / "
         f"실전: {live_line} "
         f"(${us_sim.LIVE_AMOUNT_USD:g}/회 · 총한도 ${us_sim.MAX_TOTAL_USD:g})\n"
+        f"🛡️ {us_defense.format_status_line()}\n"
         f"병렬시뮬: {'ON' if us_sim.PARALLEL_SIM else 'OFF'} "
         f"(최대 {us_sim.MAX_SIM_POSITIONS}종) · "
         f"스킵알림 {us_sim.SKIP_NOTIFY_INTERVAL_MIN}분\n"
